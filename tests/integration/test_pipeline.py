@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from memx import Messages, Text, Turn
 from memx.testing import FakeJudge, SentenceExtractor
 
-SCOPE = "memory.acme.jyotish"
+SCOPE = "memory.acme.alex"
 
 
 def say(*lines: str) -> Messages:

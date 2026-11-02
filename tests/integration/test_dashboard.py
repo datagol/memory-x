@@ -6,7 +6,7 @@ import pytest
 from memx.testing import FakeJudge, SentenceExtractor
 from memx_api.app import app
 
-SCOPE = "memory.acme.jyotish"
+SCOPE = "memory.acme.alex"
 
 
 def theme_verdict(candidate: str, neighbor: str) -> tuple[str, float]:

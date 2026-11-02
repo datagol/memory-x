@@ -14,8 +14,8 @@ pytestmark = [
     pytest.mark.skipif(os.environ.get("MEMX_LIVE") != "1", reason="set MEMX_LIVE=1 to call real models"),
 ]
 
-PARENT = "memory.acme.jyotish"
-CHILD = "memory.acme.jyotish.agent1"
+PARENT = "memory.acme.alex"
+CHILD = "memory.acme.alex.agent1"
 
 
 @pytest.fixture

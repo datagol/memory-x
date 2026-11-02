@@ -9,7 +9,7 @@ from memx.providers.http import ProviderError
 from memx.testing import SentenceExtractor
 from memx_api.app import app
 
-SCOPE = "memory.acme.jyotish"
+SCOPE = "memory.acme.alex"
 
 
 def say(text: str) -> Messages:

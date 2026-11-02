@@ -33,8 +33,8 @@ def fact(text: str, category: str = "preference", scope: str = "memory.a", **kw)
 
 
 def test_scope_chain_and_validation():
-    s = ScopePath.parse("memory.acme.jyotish.agent-1")
-    assert s.chain_str() == ["memory", "memory.acme", "memory.acme.jyotish", "memory.acme.jyotish.agent-1"]
+    s = ScopePath.parse("memory.acme.alex.agent-1")
+    assert s.chain_str() == ["memory", "memory.acme", "memory.acme.alex", "memory.acme.alex.agent-1"]
     assert s.tenant == "acme" and ScopePath.parse("memory").tenant == "memory"
     assert ScopePath.parse("memory.acme").is_ancestor_of(s)
     assert not s.is_ancestor_of(s)

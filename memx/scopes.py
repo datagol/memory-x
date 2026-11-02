@@ -13,7 +13,7 @@ class InvalidScope(ValueError):
 
 @dataclass(frozen=True, order=True)
 class ScopePath:
-    """A dotted memory scope such as ``memory.acme.jyotish.agent1``.
+    """A dotted memory scope such as ``memory.acme.alex.agent1``.
 
     Recall at a scope sees facts at that scope and every ancestor; writes go to the scope itself.
     """

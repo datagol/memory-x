@@ -52,9 +52,9 @@ uv venv --python 3.12 && uv pip install -e '.[dev]'
 echo "OPENROUTER_API_KEY=sk-or-..." > .env
 .venv/bin/memx migrate
 
-.venv/bin/memx insert memory.acme.jyotish --text "I lead the data platform team. We never deploy on Fridays."
-.venv/bin/memx render memory.acme.jyotish
-.venv/bin/memx recall memory.acme.jyotish.agent1 "can I ship this on Friday?"
+.venv/bin/memx insert memory.acme.alex --text "I lead the data platform team. We never deploy on Fridays."
+.venv/bin/memx render memory.acme.alex
+.venv/bin/memx recall memory.acme.alex.agent1 "can I ship this on Friday?"
 ```
 
 Run the API, dashboard and a background worker in containers:
@@ -157,17 +157,17 @@ Facts that are returned get their recall count bumped, which slowly raises their
 ### Example memory block
 
 ```markdown
-# Memory: memory.datagol.jyotish
+# Memory: memory.acme.alex
 
 ## Identity
-- Jyotish is VPE at DataGOL.
-- Aasim is the head of Devops at DataGOL.
+- Sam Rivera is the CTO of Acme.
+- Dana Kim leads the DevOps team at Acme.
 
 ## Rules
-- Technical questions should be directed to Jyotish.
+- Technical questions should be directed to Sam Rivera.
 
 ## Events
-- (2026-11-03) The user will be on vacation on 2026-11-03.
+- (2026-11-03) The user is on vacation on 2026-11-03.
 ```
 
 ## Concepts
@@ -176,7 +176,7 @@ Facts that are returned get their recall count bumped, which slowly raises their
 
 A scope is a dot path of any depth, such as `memory.{tenant}.{user}.{agent}`. Labels may contain letters, digits, `_` and `-`, up to 64 characters each. The label under `memory` is the **tenant**: entities are shared within a tenant and never across tenants.
 
-- **Reads inherit downward.** An agent at `memory.acme.jyotish.agent1` sees facts from all four levels. Siblings never see each other.
+- **Reads inherit downward.** An agent at `memory.acme.alex.agent1` sees facts from all four levels. Siblings never see each other.
 - **Writes go to the exact scope given.**
 - **Corrections respect scope.** A fact at a narrower scope that contradicts a broader one hides the broader fact for that branch only (a shadow). A broader correction retires contradicting facts stored below it, so "I don't like chicken anymore" at the user level retires "likes chicken" at the agent level.
 - **Promote** copies a fact to a broader scope, reconciles it there and marks the original as replaced.
@@ -253,13 +253,13 @@ from memx import Memory, Messages, Text, Turn
 
 async with await Memory.connect() as mem:
     receipt = await mem.insert(
-        "memory.acme.jyotish.agent1",
+        "memory.acme.alex.agent1",
         Messages(turns=[Turn(role="user", content="btw I switched to light mode, the dark one hurts my eyes")]),
         mode="inline",                       # or "background" / "queued"
     )
     await mem.insert("memory.acme", Text(text=open("onboarding.md").read(), source="onboarding", trust=0.9))
 
-    result = await mem.recall("memory.acme.jyotish.agent1", "which theme should the dashboard use?", explain=True)
+    result = await mem.recall("memory.acme.alex.agent1", "which theme should the dashboard use?", explain=True)
     print(result.mode, result.markdown)
 ```
 
@@ -480,7 +480,7 @@ Each of these came from a real failure found while testing against the live mode
 
 ## Known gaps and next steps
 
-- **"The user" has no name.** Facts from a user's own conversations say "The user…", and nothing tells memx that the user at `memory.datagol.jyotish` is Jyotish. A per-scope subject would let those facts link to the person entity. Proposed, not built.
+- **"The user" has no name.** Facts from a user's own conversations say "The user…", and nothing tells memx that the user at `memory.acme.alex` is Alex. A per-scope subject would let those facts link to the person entity. Proposed, not built.
 - **Named participants get full trust.** A colleague's claim about the user counts as much as the user's own statement. A separate, lower trust for named participants is under consideration.
 - **The walk is not yet measured.** Next is a set of about 20 organizational questions that need a hop, plus the LongMemEval multi-session and knowledge-update questions with the walk on and off.
 - **Direct provider clients.** Everything goes through OpenRouter today. Direct Anthropic, OpenAI or TypeSafe clients fit behind the same `Extractor`, `Embedder` and `Judge` interfaces.
