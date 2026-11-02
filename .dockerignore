@@ -1,0 +1,9 @@
+.venv
+.env
+credentials.txt
+eval/longmemeval/data
+eval/longmemeval/results
+**/__pycache__
+.pytest_cache
+web/node_modules
+memx_api/static
