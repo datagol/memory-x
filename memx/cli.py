@@ -123,11 +123,17 @@ def main(argv: list[str] | None = None) -> None:
     ex = sub.add_parser("expiry-reapply", help="recompute event expiry under the current settings")
     ex.add_argument("--scope", default=None, help="this scope and everything under it; default: all")
     ex.add_argument("--dry-run", action="store_true", help="report only")
+    sub.add_parser("banner", help="print where the dashboard, API and MCP server are reachable")
     s = sub.add_parser("serve", help="run the HTTP API")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if args.cmd == "banner":
+        from memx.banner import banner
+
+        print(banner(), flush=True)
+        return
     if args.cmd == "serve":
         import uvicorn
 

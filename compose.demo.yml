@@ -31,6 +31,10 @@ services:
       MEMX_PROVIDERS: demo
       MEMX_INSERT_MODE: background   # jobs run inside the API process; no worker needed
       MEMX_API_TOKEN: ""
+      MEMX_PUBLISH: 127.0.0.1:${MEMX_DEMO_PORT:-8001}
+      MEMX_MCP_PUBLISH: 127.0.0.1:${MEMX_DEMO_MCP_PORT:-8101}
+      MEMX_BANNER: "1"
+      MEMX_BANNER_WAIT_FOR: http://mcp:8100/healthz
     ports:
       - "127.0.0.1:${MEMX_DEMO_PORT:-8001}:8000"
     depends_on:

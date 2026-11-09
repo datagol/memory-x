@@ -51,7 +51,7 @@ git clone https://github.com/datagol/memory-x && cd memory-x
 docker compose up
 ```
 
-That builds the image and starts everything:
+That builds the image and starts everything. When the API and MCP server are reachable, the terminal shows a "memory-x is up" message with these addresses and the command to connect an MCP client (after `docker compose up -d`, show it with `docker compose exec api memx banner`):
 
 | | |
 |---|---|

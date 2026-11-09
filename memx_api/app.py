@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,13 +21,31 @@ from memx.config import InsertMode
 from memx.documents import DocumentError, read_document
 from memx.providers.http import ProviderError
 from memx.types import Category, Fact, FactHistory, ForgetReport, IngestInput, InsertReceipt, Recall, RecallMode, Turn
+from memx.banner import announce_when_ready, quiet_health_checks
 from memx_api import dashboard
+
+quiet_health_checks()
 
 STATIC = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Under compose, print where everything is once the API and the MCP server answer (see memx.banner).
+    announcer = None
+    if os.environ.get("MEMX_BANNER"):
+        urls = ["http://127.0.0.1:8000/healthz", *filter(None, os.environ.get("MEMX_BANNER_WAIT_FOR", "").split(","))]
+        announcer = asyncio.create_task(announce_when_ready(urls))
+    try:
+        async with _memory_lifespan(app):
+            yield
+    finally:
+        if announcer is not None:
+            announcer.cancel()
+
+
+@asynccontextmanager
+async def _memory_lifespan(app: FastAPI):
     cfg = MemxConfig()
     app.state.config, app.state.startup_error, app.state.memory = cfg, None, None
     if cfg.providers != "demo" and not cfg.has_api_key():

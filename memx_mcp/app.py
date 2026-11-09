@@ -16,7 +16,10 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from memx import MemxConfig
+from memx.banner import quiet_health_checks
 from memx_mcp.server import close, mcp
+
+quiet_health_checks()
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

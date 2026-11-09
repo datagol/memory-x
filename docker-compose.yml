@@ -2,6 +2,9 @@
 #
 #   docker compose up            # dashboard and API on http://localhost:8000, MCP on http://localhost:8100/mcp
 #
+# Once the API and MCP server answer, the api service prints where everything is and how to connect an MCP client.
+# With `up -d`, show it with: docker compose exec api memx banner
+#
 # Put OPENROUTER_API_KEY in .env (copy .env.example) before or after the first start; without it everything
 # starts and says what to set. After editing .env, run `docker compose up -d` again.
 #
@@ -49,6 +52,11 @@ services:
     environment:
       <<: *memx-env
       MEMX_INSERT_MODE: ${MEMX_INSERT_MODE:-queued}
+      # For the start-up message: the published addresses, and the MCP server to wait for.
+      MEMX_PUBLISH: ${MEMX_PUBLISH:-127.0.0.1:8000}
+      MEMX_MCP_PUBLISH: ${MEMX_MCP_PUBLISH:-127.0.0.1:8100}
+      MEMX_BANNER: "1"
+      MEMX_BANNER_WAIT_FOR: http://mcp:8100/healthz
     ports:
       - "${MEMX_PUBLISH:-127.0.0.1:8000}:8000"   # host[:port] for the dashboard; see .env.example
     healthcheck:
@@ -56,6 +64,7 @@ services:
       interval: 10s
       timeout: 3s
       start_period: 20s
+      start_interval: 1s
       retries: 3
 
   worker:
@@ -79,6 +88,7 @@ services:
       interval: 10s
       timeout: 3s
       start_period: 20s
+      start_interval: 1s
       retries: 3
 
 volumes:
