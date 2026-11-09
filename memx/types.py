@@ -132,6 +132,7 @@ class EntityMention(BaseModel):
 
     name: str
     type: str = "other"
+    aka: list[str] = Field(default_factory=list)  # other names the extractor is confident mean the same thing
 
 
 class EntityRef(BaseModel):
@@ -151,6 +152,7 @@ class Candidate(BaseModel):
     text: str
     speaker: str
     category_hint: Category | None = None
+    attribute: str | None = None  # the single attribute the fact states ("role", "reading progress")
     is_event: bool = False
     time_text: str | None = None
     event_date: date | None = None
@@ -213,6 +215,7 @@ class InsertReceipt(BaseModel):
     superseded: int = 0
     shadowed: int = 0
     rejected: int = 0
+    held_back: int = 0  # replacements Jev suggested but the policy held back; both facts stay, linked as related
     facts: list[Fact] | None = None
     error: str | None = None
 

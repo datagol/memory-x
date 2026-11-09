@@ -11,6 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from memx import scope_settings
 from memx.context import Context
 from memx.db import repo
 from memx.recall.decay import access_factor, final_score, freshness, priority
@@ -72,8 +73,6 @@ async def recall(
     path = ScopePath.parse(scope)
     scope = str(path)
     chain = path.chain_str()
-    budget = budget_tokens or cfg.budget_tokens
-    limit = budget * cfg.budget_safety
     cats = sorted(c.value for c in categories) if categories else None
     now = as_of or datetime.now(UTC)
     recall_id = uuid.uuid4()
@@ -81,8 +80,12 @@ async def recall(
     timings: dict[str, int] = {}
     why: dict[str, str] = {}
     candidates: list[dict[str, Any]] = []
+    history_p: float | None = 1.0 if cfg.history_in_recall == "always" else None
 
     async with ctx.pool.connection() as conn:
+        settings = await scope_settings.resolve(conn, cfg, scope)
+        budget = budget_tokens or settings["budget_tokens"]
+        limit = budget * cfg.budget_safety
         shadowed = await repo.shadowed_ids(conn, chain)
         total, visible = await repo.chain_token_total(conn, chain, as_of)
         fits = total + RENDER_OVERHEAD_TOKENS <= limit
@@ -138,7 +141,7 @@ async def recall(
             # The walk: follow shared entities and topics outward from the top search hits.
             expanded: list[Reached] = []
             walk_info = None
-            if cfg.walk_enabled and graded_rows:
+            if settings["walk_enabled"] and graded_rows:
                 t = time.perf_counter()
                 top_rrf = max(float(r["rrf"]) for r in graded_rows)
                 seeds = {r["id"]: float(r["rrf"]) / top_rrf for r in graded_rows[: cfg.walk_seeds]}
@@ -185,12 +188,15 @@ async def recall(
             t = time.perf_counter()
             if cfg.grade_enabled and facts:
                 searched = {i for i, f in enumerate(facts) if f.id in info and i in paths}
-                relevance, res = await grade(ctx.judge, query, recent_turns, facts, scope, now, paths, both=searched)
+                relevance, res = await grade(ctx.judge, query, recent_turns, facts, scope, now, paths, both=searched,
+                                             ask_history=cfg.history_in_recall == "when_asked")
+                if "history" in res.answers:
+                    history_p = float(res.answers["history"].get("noul", 0.0))
                 decisions.append({
                     "step": "grade", "question_version": GRADE_VERSION, "recall_id": recall_id, "scope": scope,
                     "latency_ms": res.latency_ms,
                     "result": {"query": query, "scores": {str(f.id): r for f, r in zip(facts, relevance)},
-                               "walked": [str(i) for i in walked]},
+                               "walked": [str(i) for i in walked], "asks_history": history_p},
                 })
                 levels = {str(f.id): res.answers[f"f{i}"].get("probabilities") for i, f in enumerate(facts)}
                 link_won = {str(f.id): res.answers[f"f{i}"].get("via_link", False) for i, f in enumerate(facts)}
@@ -240,10 +246,37 @@ async def recall(
                     **_components(w.fact, now, cfg),
                 })
 
-        truncated = len(picked) < len(items)
         related = await repo.related_pairs(conn, [f.id for f in picked])
-        markdown = render(scope, picked, related, now=now, cfg=cfg)
-        token_count = estimate_tokens(markdown, cfg.chars_per_token)
+        history: dict[Any, list[Fact]] = {}
+        added: list[Any] = []  # history entries in the order they were granted room, so the last can go first
+        if history_p is not None and history_p >= cfg.history_min_prob:
+            versions = await repo.replaced_versions(conn, [f.id for f in picked], chain, as_of)
+            for f in picked:  # score order: the most relevant facts get their history first
+                for old in versions.get(f.id, []):
+                    history.setdefault(f.id, []).append(old)
+                    added.append(f.id)
+        # Selection counted each fact's own tokens; the render adds more (history lines, "(said …)" dates on
+        # related facts). Measure the real block and trim until it fits: history first, then the lowest-scored fact.
+        while True:
+            # Ranked recall answers a question: most relevant first. Full memory keeps the fixed order.
+            markdown = render(scope, picked, related, now=now, cfg=cfg, history=history,
+                              scores={f.id: f.score for f in picked} if mode == "ranked" else None)
+            token_count = estimate_tokens(markdown, cfg.chars_per_token)
+            if token_count <= limit or (not added and len(picked) <= 1):
+                break
+            if added:
+                fid = added.pop()
+                history[fid].pop()
+                if not history[fid]:
+                    del history[fid]
+                continue
+            dropped = picked.pop()
+            why[str(dropped.id)] = "over_budget"
+            for c in candidates:
+                if c["id"] == str(dropped.id):
+                    c["status"] = "over_budget"
+            related = [(a, b) for a, b in related if dropped.id not in (a, b)]
+        truncated = len(picked) < len(items)
         ids = [f.id for f in picked]
         timings["total_ms"] = int((time.perf_counter() - started) * 1000)
         explanation = {
@@ -251,7 +284,9 @@ async def recall(
             "chain": chain, "chain_tokens": total, "chain_facts": visible, "shadowed": len(shadowed),
             "grade_floor": cfg.grade_floor, "k_max": k or cfg.recall_k_max, "query": query,
             "as_of": now.isoformat(), "timings": timings, "related_pairs": [[str(a), str(b)] for a, b in related],
+            "scope_settings": settings.overridden(),
             "walk": walk_info, "walk_score_factor": cfg.walk_score_factor, "walk_grade_floor": cfg.walk_grade_floor,
+            "asks_history": history_p, "history": {str(k): [str(o.id) for o in v] for k, v in history.items()},
             "candidates": candidates,
         }
         async with conn.transaction():

@@ -20,6 +20,9 @@ FACT_COLS = """
   f.ingest_id, f.created_at, f.token_count, f.topic, f.topic_confidence
 """
 
+# Extra columns reconcile needs: the extractor's attribute label and the window a fact came from.
+NEIGHBOR_COLS = "f.attrs->>'attribute' AS attribute, (f.attrs->>'window')::int AS extract_window"
+
 # Facts recall may return. %(as_of)s lets callers evaluate expiry at a past moment (replays, evaluation).
 VISIBLE = """
   f.status = 'active'
@@ -40,12 +43,6 @@ def or_tsquery(text: str, limit: int = 32) -> str | None:
 
 async def ensure_scope(conn: AsyncConnection, scope: str) -> None:
     await conn.execute("INSERT INTO memx_scope (path) VALUES (%s::ltree) ON CONFLICT DO NOTHING", (scope,))
-
-
-async def scope_settings(conn: AsyncConnection, scope: str) -> dict[str, Any]:
-    cur = await conn.execute("SELECT settings FROM memx_scope WHERE path = %s::ltree", (scope,))
-    row = await cur.fetchone()
-    return row["settings"] if row else {}
 
 
 # ---- Ingest -----------------------------------------------------------------
@@ -73,12 +70,25 @@ async def create_ingest(
 
 
 async def reopen_failed_ingest(conn: AsyncConnection, ingest_id: UUID, *, inline: bool) -> bool:
-    """Put a failed ingest and its job back in play. Saved windows and candidate outcomes are kept."""
+    """Put a failed or abandoned ingest and its job back in play. Saved windows and candidate outcomes are kept.
+
+    An ingest is abandoned when it never reached ``committed`` and nothing is working on it any more: its job is
+    dead or done, or was left ``running`` past its lease by a process that died mid-ingest (a benchmark run lost a
+    whole session this way: the ingest sat in ``received`` with zero facts and every resend returned its receipt).
+    A queued job, or a running one inside its lease, is left alone.
+    """
     cur = await conn.execute(
         """
-        UPDATE memx_ingest
+        UPDATE memx_ingest i
            SET status = CASE WHEN candidates IS NULL THEN 'received' ELSE 'extracted' END, error = NULL
-         WHERE id = %s AND status = 'failed'
+         WHERE i.id = %s
+           AND (i.status = 'failed'
+                OR (i.status IN ('received', 'extracted') AND NOT EXISTS (
+                        SELECT 1 FROM memx_job j
+                         WHERE j.idempotency_key = 'ingest:' || i.id::text
+                           AND (j.status = 'queued'
+                                OR (j.status = 'running'
+                                    AND j.locked_at + make_interval(secs => j.lease_seconds) > now())))))
         RETURNING id
         """,
         (ingest_id,),
@@ -114,6 +124,11 @@ async def save_window(conn: AsyncConnection, ingest_id: UUID, index: int, facts:
         """,
         (str(index), Jsonb(facts), tin, tout, model, ingest_id),
     )
+
+
+async def set_extract_batch(conn: AsyncConnection, ingest_id: UUID, state: dict | None) -> None:
+    await conn.execute("UPDATE memx_ingest SET extract_batch = %s WHERE id = %s",
+                       (Jsonb(state) if state is not None else None, ingest_id))
 
 
 async def save_candidates(conn: AsyncConnection, ingest_id: UUID, candidates: list[dict]) -> None:
@@ -203,7 +218,7 @@ async def find_neighbors(
         params["q"] = tsq
         fts = f"""
         UNION ALL
-        (SELECT {FACT_COLS}, 1 - (f.embedding <=> %(e)s::vector) AS sim, 'fts' AS via
+        (SELECT {FACT_COLS}, {NEIGHBOR_COLS}, 1 - (f.embedding <=> %(e)s::vector) AS sim, 'fts' AS via
            FROM memx_fact f
           WHERE {where} AND f.status = 'active' {extra}
             AND f.tsv @@ to_tsquery('english', %(q)s)
@@ -211,7 +226,7 @@ async def find_neighbors(
           LIMIT %(kf)s)
         """
     sql = f"""
-        (SELECT {FACT_COLS}, 1 - (f.embedding <=> %(e)s::vector) AS sim, 'vec' AS via
+        (SELECT {FACT_COLS}, {NEIGHBOR_COLS}, 1 - (f.embedding <=> %(e)s::vector) AS sim, 'vec' AS via
            FROM memx_fact f
           WHERE {where} AND f.status = 'active' {extra}
           ORDER BY f.embedding <=> %(e)s::vector
@@ -259,13 +274,16 @@ async def fact_id_for_candidate(conn: AsyncConnection, ingest_id: UUID, index: i
     return row["id"] if row else None
 
 
-async def reinforce(conn: AsyncConnection, fact_id: UUID) -> None:
+async def reinforce(conn: AsyncConnection, fact_id: UUID, at: datetime) -> None:
+    """Count a repeat. ``at`` is when the repeat was said (the ingest's observed_at), not when it was processed:
+    a transcript backfilled today must not make a 2023 fact look new."""
     await conn.execute(
         """
-        UPDATE memx_fact SET reinforced_count = reinforced_count + 1, last_reinforced_at = now()
+        UPDATE memx_fact SET reinforced_count = reinforced_count + 1,
+               last_reinforced_at = greatest(last_reinforced_at, %s)
          WHERE id = %s
         """,
-        (fact_id,),
+        (at, fact_id),
     )
 
 
@@ -319,26 +337,79 @@ async def add_links(conn: AsyncConnection, links: list[tuple[UUID, UUID, str, fl
 # ---- Entities ---------------------------------------------------------------
 
 
-async def find_entity(conn: AsyncConnection, tenant: str, norm: str) -> dict[str, Any] | None:
+ENTITY_COLS = "id, name, norm, type, aliases, known_as"
+
+
+async def find_entities_exact(conn: AsyncConnection, tenant: str, norm: str) -> list[dict[str, Any]]:
+    """Entities with exactly this name, including namesakes ("priya", "priya~2") and merged spellings."""
     cur = await conn.execute(
-        "SELECT id, name, norm, type FROM memx_entity WHERE tenant = %s AND (norm = %s OR %s = ANY(aliases)) LIMIT 1",
-        (tenant, norm, norm),
+        f"""
+        SELECT {ENTITY_COLS} FROM memx_entity
+         WHERE tenant = %(t)s AND (split_part(norm, '~', 1) = %(n)s OR %(n)s = ANY(aliases))
+         ORDER BY norm
+        """,
+        {"t": tenant, "n": norm},
     )
-    return await cur.fetchone()
+    return await cur.fetchall()
 
 
 async def find_entity_partial(conn: AsyncConnection, tenant: str, words: list[str], limit: int = 5) -> list[dict[str, Any]]:
-    """Entities in the tenant sharing at least one word with the mention, longest shared prefix first."""
+    """Entities in the tenant sharing at least one word with the mention, longest first."""
     words = [w for w in words if len(w) >= 3]
     if not words:
         return []
     cur = await conn.execute(
-        """
-        SELECT id, name, norm, type FROM memx_entity
-         WHERE tenant = %s AND string_to_array(norm, ' ') && %s::text[]
+        f"""
+        SELECT {ENTITY_COLS} FROM memx_entity
+         WHERE tenant = %s AND string_to_array(split_part(norm, '~', 1), ' ') && %s::text[]
          ORDER BY length(norm) DESC LIMIT %s
         """,
         (tenant, words, limit),
+    )
+    return await cur.fetchall()
+
+
+async def find_entities_known_as(conn: AsyncConnection, tenant: str, norm: str, akas: list[str]) -> list[dict[str, Any]]:
+    """Entities linked to this name through suggested alternative names, in either direction: a stored "Blore"
+    whose alternatives include "bangalore", or a new "Bangalore" whose alternatives include a stored name."""
+    cur = await conn.execute(
+        f"""
+        SELECT {ENTITY_COLS} FROM memx_entity
+         WHERE tenant = %(t)s AND (%(n)s = ANY(known_as) OR split_part(norm, '~', 1) = ANY(%(a)s::text[])
+                                   OR aliases && %(a)s::text[])
+        """,
+        {"t": tenant, "n": norm, "a": akas},
+    )
+    return await cur.fetchall()
+
+
+async def find_entities_similar(conn: AsyncConnection, tenant: str, vector: list[float], min_sim: float,
+                                limit: int = 3) -> list[dict[str, Any]]:
+    """Known entities whose name embedding is close to this one. Candidates for Jev only, never merged on this."""
+    cur = await conn.execute(
+        f"""
+        SELECT * FROM (
+          SELECT {ENTITY_COLS}, 1 - (embedding <=> %(v)s::vector) AS sim FROM memx_entity
+           WHERE tenant = %(t)s AND embedding IS NOT NULL ORDER BY embedding <=> %(v)s::vector LIMIT %(k)s
+        ) x WHERE sim >= %(m)s
+        """,
+        {"t": tenant, "v": Vector(vector), "k": limit, "m": min_sim},
+    )
+    return await cur.fetchall()
+
+
+async def find_entities_similar_to(conn: AsyncConnection, tenant: str, entity_id: UUID, min_sim: float,
+                                   limit: int = 3) -> list[dict[str, Any]]:
+    cur = await conn.execute(
+        f"""
+        SELECT * FROM (
+          SELECT {ENTITY_COLS}, 1 - (e.embedding <=> s.embedding) AS sim
+            FROM memx_entity e, (SELECT embedding FROM memx_entity WHERE id = %(id)s) s
+           WHERE e.tenant = %(t)s AND e.id <> %(id)s AND e.embedding IS NOT NULL AND s.embedding IS NOT NULL
+           ORDER BY e.embedding <=> s.embedding LIMIT %(k)s
+        ) x WHERE sim >= %(m)s
+        """,
+        {"t": tenant, "id": entity_id, "k": limit, "m": min_sim},
     )
     return await cur.fetchall()
 
@@ -358,20 +429,58 @@ async def entity_sample_facts(conn: AsyncConnection, entity_id: UUID, limit: int
 
 async def tenant_entities(conn: AsyncConnection, tenant: str) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT id, name, norm, type, aliases FROM memx_entity WHERE tenant = %s ORDER BY length(norm), name", (tenant,))
+        f"SELECT {ENTITY_COLS} FROM memx_entity WHERE tenant = %s ORDER BY length(norm), name", (tenant,))
     return await cur.fetchall()
+
+
+async def entities_without_embedding(conn: AsyncConnection, tenant: str) -> list[dict[str, Any]]:
+    cur = await conn.execute("SELECT id, name FROM memx_entity WHERE tenant = %s AND embedding IS NULL", (tenant,))
+    return await cur.fetchall()
+
+
+async def set_entity_embedding(conn: AsyncConnection, entity_id: UUID, vector: list[float]) -> None:
+    await conn.execute("UPDATE memx_entity SET embedding = %s::vector WHERE id = %s", (Vector(vector), entity_id))
+
+
+async def entities_in_ingest(conn: AsyncConnection, ids: list[UUID], ingest_id: UUID | None) -> set[UUID]:
+    """Which of these entities are already named by a fact from this same insert."""
+    if not ids or ingest_id is None:
+        return set()
+    cur = await conn.execute(
+        "SELECT DISTINCT fe.entity_id FROM memx_fact_entity fe JOIN memx_fact f ON f.id = fe.fact_id "
+        "WHERE fe.entity_id = ANY(%s) AND f.ingest_id = %s", (ids, ingest_id))
+    return {r["entity_id"] for r in await cur.fetchall()}
+
+
+async def entity_fact_counts(conn: AsyncConnection, ids: list[UUID]) -> dict[UUID, int]:
+    cur = await conn.execute(
+        "SELECT entity_id, count(*) AS n FROM memx_fact_entity WHERE entity_id = ANY(%s) GROUP BY 1", (ids,))
+    return {r["entity_id"]: int(r["n"]) for r in await cur.fetchall()}
+
+
+async def add_known_as(conn: AsyncConnection, entity_id: UUID, names: list[str]) -> None:
+    if names:
+        await conn.execute(
+            "UPDATE memx_entity SET known_as = ARRAY(SELECT DISTINCT unnest(known_as || %s::text[])) WHERE id = %s",
+            (names, entity_id),
+        )
 
 
 async def alias_entity(conn: AsyncConnection, entity_id: UUID, name: str, norm: str) -> None:
     """Record a new spelling. A longer spelling becomes the entity's name and key; the old key turns into an alias."""
     await conn.execute(
         """
-        UPDATE memx_entity SET
-          name = CASE WHEN length(%(norm)s) > length(norm) THEN %(name)s ELSE name END,
-          aliases = CASE WHEN length(%(norm)s) > length(norm) THEN array_append(aliases, norm)
-                         WHEN %(norm)s = ANY(aliases) THEN aliases ELSE array_append(aliases, %(norm)s) END,
-          norm = CASE WHEN length(%(norm)s) > length(norm) THEN %(norm)s ELSE norm END
-         WHERE id = %(id)s
+        UPDATE memx_entity e SET
+          name = CASE WHEN x.rename THEN %(name)s ELSE e.name END,
+          aliases = CASE WHEN x.rename THEN array_append(e.aliases, e.norm)
+                         WHEN %(norm)s = ANY(e.aliases) THEN e.aliases ELSE array_append(e.aliases, %(norm)s) END,
+          norm = CASE WHEN x.rename THEN %(norm)s ELSE e.norm END
+          FROM (SELECT length(%(norm)s) > length(m.norm)
+                       -- the key can only move to the longer spelling while no other entity holds it
+                       AND NOT EXISTS (SELECT 1 FROM memx_entity o
+                                        WHERE o.tenant = m.tenant AND o.norm = %(norm)s AND o.id <> m.id) AS rename
+                  FROM memx_entity m WHERE m.id = %(id)s) x
+         WHERE e.id = %(id)s
         """,
         {"id": entity_id, "name": name, "norm": norm},
     )
@@ -389,8 +498,10 @@ async def merge_entity(conn: AsyncConnection, from_id: UUID, into_id: UUID) -> N
     )
     await conn.execute(
         """
-        UPDATE memx_entity t SET aliases = (
-          SELECT array_agg(DISTINCT a) FROM unnest(t.aliases || f.aliases || ARRAY[f.norm]) a)
+        UPDATE memx_entity t SET
+          aliases = (SELECT array_agg(DISTINCT a) FROM unnest(t.aliases || f.aliases || ARRAY[split_part(f.norm, '~', 1)]) a),
+          known_as = ARRAY(SELECT DISTINCT unnest(t.known_as || f.known_as)),
+          embedding = coalesce(t.embedding, f.embedding)
           FROM memx_entity f WHERE t.id = %(into)s AND f.id = %(from)s
         """,
         {"from": from_id, "into": into_id},
@@ -398,17 +509,37 @@ async def merge_entity(conn: AsyncConnection, from_id: UUID, into_id: UUID) -> N
     await conn.execute("DELETE FROM memx_entity WHERE id = %s", (from_id,))
 
 
-async def upsert_entity(conn: AsyncConnection, tenant: str, name: str, norm: str, etype: str) -> UUID:
+async def upsert_entity(conn: AsyncConnection, tenant: str, name: str, norm: str, etype: str,
+                        embedding: list[float] | None = None, known_as: list[str] | None = None) -> UUID:
     cur = await conn.execute(
         """
-        INSERT INTO memx_entity (tenant, name, norm, type) VALUES (%s, %s, %s, %s)
-        ON CONFLICT (tenant, norm) DO UPDATE SET type = CASE WHEN memx_entity.type = 'other' THEN excluded.type
-                                                             ELSE memx_entity.type END
+        INSERT INTO memx_entity (tenant, name, norm, type, embedding, known_as)
+        VALUES (%s, %s, %s, %s, %s::vector, %s::text[])
+        ON CONFLICT (tenant, norm) DO UPDATE SET
+          type = CASE WHEN memx_entity.type = 'other' THEN excluded.type ELSE memx_entity.type END,
+          embedding = coalesce(memx_entity.embedding, excluded.embedding),
+          known_as = ARRAY(SELECT DISTINCT unnest(memx_entity.known_as || excluded.known_as))
         RETURNING id
         """,
-        (tenant, name, norm, etype),
+        (tenant, name, norm, etype, Vector(embedding) if embedding else None, known_as or []),
     )
     return (await cur.fetchone())["id"]
+
+
+async def create_entity_variant(conn: AsyncConnection, tenant: str, name: str, norm: str, etype: str,
+                                embedding: list[float] | None = None, known_as: list[str] | None = None) -> UUID:
+    """A second entity with a name that is already taken by someone else ("Priya" from the bakery). Stored under a
+    numbered key, "priya~2", so the name stays the same and the key stays unique."""
+    cur = await conn.execute(
+        "SELECT norm FROM memx_entity WHERE tenant = %s AND split_part(norm, '~', 1) = %s", (tenant, norm))
+    taken = {r["norm"] for r in await cur.fetchall()}
+    if norm not in taken:
+        return await upsert_entity(conn, tenant, name, norm, etype, embedding, known_as)
+    # The next unused number: counting rows would reuse "priya~3" after "priya~2" was merged away.
+    n = 2
+    while f"{norm}~{n}" in taken:
+        n += 1
+    return await upsert_entity(conn, tenant, name, f"{norm}~{n}", etype, embedding, known_as)
 
 
 async def link_entity(conn: AsyncConnection, fact_id: UUID, entity_id: UUID, surface: str | None) -> None:
@@ -605,6 +736,37 @@ async def shadowed_ids(conn: AsyncConnection, chain: list[str]) -> set[UUID]:
     return {r["b"] for r in await cur.fetchall()}
 
 
+async def replaced_versions(conn: AsyncConnection, ids: list[UUID], chain: list[str],
+                            as_of: datetime | None = None, per_fact: int = 2) -> dict[UUID, list[Fact]]:
+    """Earlier versions directly replaced by each of ``ids`` (newest first), as of a moment.
+
+    Only versions an agent at this scope chain could have seen: a parent-scope fact can retire facts in many child
+    scopes, and a sibling's retired fact must not appear here. Flagged facts stay hidden, and a promotion (the same
+    text copied to a broader scope) is not a change of value.
+    """
+    if not ids:
+        return {}
+    cur = await conn.execute(
+        f"""
+        SELECT {FACT_COLS} FROM memx_fact f JOIN memx_fact r ON r.id = f.superseded_by
+         WHERE f.superseded_by = ANY(%(ids)s) AND f.status = 'superseded'
+           AND f.scope = ANY(%(chain)s::ltree[])
+           AND NOT (f.flags ? 'injection_suspect')
+           AND f.text_hash <> r.text_hash
+           AND coalesce(r.attrs->>'promoted_from', '') <> f.id::text
+           AND (f.superseded_at IS NULL OR f.superseded_at <= coalesce(%(as_of)s::timestamptz, now()))
+         ORDER BY f.observed_at DESC, f.id
+        """,
+        {"ids": ids, "chain": chain, "as_of": as_of},
+    )
+    out: dict[UUID, list[Fact]] = {}
+    for row in await cur.fetchall():
+        versions = out.setdefault(row["superseded_by"], [])
+        if len(versions) < per_fact:
+            versions.append(to_fact(row))
+    return out
+
+
 async def related_pairs(conn: AsyncConnection, ids: list[UUID]) -> list[tuple[UUID, UUID]]:
     if not ids:
         return []
@@ -659,9 +821,15 @@ async def hybrid_candidates(
 
 
 async def mark_accessed(conn: AsyncConnection, ids: list[UUID]) -> None:
+    """Count a recall of each fact. Rows are locked in id order: concurrent recalls over overlapping facts (every
+    full-memory recall of a scope touches the same rows) would otherwise lock them in different orders and deadlock."""
     if ids:
         await conn.execute(
-            "UPDATE memx_fact SET access_count = access_count + 1, last_accessed_at = now() WHERE id = ANY(%s)",
+            """
+            UPDATE memx_fact f SET access_count = f.access_count + 1, last_accessed_at = now()
+              FROM (SELECT id FROM memx_fact WHERE id = ANY(%s) ORDER BY id FOR UPDATE) locked
+             WHERE f.id = locked.id
+            """,
             (ids,),
         )
 
@@ -826,8 +994,21 @@ async def sweep(conn: AsyncConnection, *, expired_retention_days: int, decision_
         (expired_retention_days,),
     )
     purged = len(await cur.fetchall())
+    # Old decisions go, except the verdicts behind a replacement or shadow still in effect: history() shows why a
+    # fact was retired, and rereconcile re-reads exactly those verdicts when the policy changes.
     cur = await conn.execute(
-        "DELETE FROM memx_decision WHERE created_at < now() - make_interval(days => %s) RETURNING id",
+        """
+        DELETE FROM memx_decision d
+         WHERE d.created_at < now() - make_interval(days => %s)
+           AND NOT (d.step = 'verdict' AND (
+                 EXISTS (SELECT 1 FROM memx_fact f
+                          WHERE f.status = 'superseded'
+                            AND ((f.id = d.object_fact_id AND f.superseded_by = d.subject_fact_id)
+                              OR (f.id = d.subject_fact_id AND f.superseded_by = d.object_fact_id)))
+              OR EXISTS (SELECT 1 FROM memx_fact_link l
+                          WHERE l.kind = 'shadows' AND l.a = d.subject_fact_id AND l.b = d.object_fact_id)))
+        RETURNING id
+        """,
         (decision_retention_days,),
     )
     decisions = len(await cur.fetchall())
@@ -841,6 +1022,38 @@ async def sweep(conn: AsyncConnection, *, expired_retention_days: int, decision_
     jobs = len(await cur.fetchall())
     await prune_entities(conn)
     return {"expired": expired, "purged": purged, "decisions_pruned": decisions, "jobs_pruned": jobs}
+
+
+async def event_facts(conn: AsyncConnection, scope: str | None) -> list[dict[str, Any]]:
+    """Dated event facts that are active or expired (not yet purged), for re-applying the expiry policy."""
+    cur = await conn.execute(
+        """
+        SELECT id, scope::text AS scope, event_at, observed_at, stale_after, status FROM memx_fact
+         WHERE category = 'event' AND event_at IS NOT NULL AND status IN ('active', 'expired')
+           AND (%(scope)s::ltree IS NULL OR scope <@ %(scope)s::ltree)
+        """,
+        {"scope": scope},
+    )
+    return await cur.fetchall()
+
+
+async def set_event_expiry(conn: AsyncConnection, fact_id: UUID, stale_after: datetime | None, revive: bool) -> bool:
+    """Set a fact's expiry; ``revive`` also makes an expired fact active again unless that would duplicate an
+    active fact with the same text in its scope. Returns False when the revive was skipped."""
+    if revive:
+        cur = await conn.execute(
+            """
+            UPDATE memx_fact f SET stale_after = %s, status = 'active'
+             WHERE id = %s AND status = 'expired'
+               AND NOT EXISTS (SELECT 1 FROM memx_fact o WHERE o.scope = f.scope AND o.text_hash = f.text_hash
+                                                          AND o.status = 'active')
+            RETURNING id
+            """,
+            (stale_after, fact_id),
+        )
+        return bool(await cur.fetchone())
+    await conn.execute("UPDATE memx_fact SET stale_after = %s WHERE id = %s", (stale_after, fact_id))
+    return True
 
 
 # ---- Dashboard reads ----------------------------------------------------------

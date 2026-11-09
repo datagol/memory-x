@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node } from "@xyflow/react";
-import { ArrowRight, Boxes, FileText, Layers, MessageSquare, Plus, Sparkles, Trash2, Wand2 } from "lucide-react";
-import { api, type Fact, type IngestTrace, type Neighbor, type TraceCandidate } from "../lib/api";
+import { ArrowRight, Boxes, FileText, Layers, MessageSquare, Plus, Sparkles, Trash2, Upload, Wand2, X } from "lucide-react";
+import { api, type EntityPlanRow, type ExtractedDocument, type Fact, type IngestTrace, type Neighbor, type TraceCandidate } from "../lib/api";
 import { useApp } from "../lib/app";
-import { BAND_META, CATEGORY_LABEL, OUTCOME_META, VERDICT_LABEL, catVar, fmtDate, ms, num, pct, short, topicLabel, truncate } from "../lib/meta";
+import { BAND_META, CATEGORY_LABEL, HELD_REASON, OUTCOME_META, VERDICT_LABEL, catVar, fmtDate, ms, num, pct, short, topicLabel, truncate } from "../lib/meta";
 import { nodeTypes } from "../components/FlowNodes";
 import { validScope } from "../components/ScopePicker";
 import { Card, CategoryChip, Empty, ErrorBox, Loading, Pill, ProbBars, Seg, useTip, useToast } from "../components/ui";
@@ -49,6 +49,29 @@ export function AddPage() {
   const [turns, setTurns] = useState<Turn[]>([{ role: "user", content: "" }]);
   const [doc, setDoc] = useState({ text: "", source: "notes", trust: 0.8 });
   const [observed, setObserved] = useState("");
+  const [file, setFile] = useState<ExtractedDocument | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
+  const settings = useQuery({ queryKey: ["scope-settings", scope], queryFn: () => api.scopeSettings(scope) });
+  const scopeTrust = settings.data ? Number(settings.data.effective.text_trust.value) : undefined;
+  useEffect(() => { if (scopeTrust !== undefined) setDoc((cur) => ({ ...cur, trust: scopeTrust })); }, [scopeTrust, scope]);
+
+  const upload = useMutation({
+    mutationFn: (f: File) => api.extractDocument(f),
+    onSuccess: (d) => {
+      setKind("text");
+      setFile(d);
+      setDoc((cur) => ({ ...cur, text: d.text, source: d.filename ?? cur.source }));
+    },
+    onError: (e) => toast((e as Error).message, true),
+  });
+  const pick = (files: FileList | null) => { const f = files?.[0]; if (f) upload.mutate(f); };
+  const clearFile = () => { setFile(null); setDoc((cur) => ({ ...cur, text: "", source: "notes" })); };
+  const dropProps = {
+    onDragOver: (e: DragEvent) => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); setDragging(true); } },
+    onDragLeave: (e: DragEvent) => { if (!e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) setDragging(false); },
+    onDrop: (e: DragEvent) => { if (e.dataTransfer.files.length) { e.preventDefault(); setDragging(false); pick(e.dataTransfer.files); } },
+  };
 
   const run = useMutation({
     mutationFn: () => {
@@ -59,13 +82,15 @@ export function AddPage() {
     },
     onSuccess: (r) => {
       qc.invalidateQueries();
-      toast(`${r.added} added · ${r.dropped} duplicate · ${r.superseded} replaced · ${r.shadowed} shadowed`);
+      toast(`${r.added} added · ${r.dropped} duplicate · ${r.superseded} replaced · ${r.shadowed} shadowed${r.held_back ? ` · ${r.held_back} replacement${r.held_back > 1 ? "s" : ""} held back` : ""}`);
       go({ page: "ingest", id: r.ingest_id });
     },
     onError: (e) => toast((e as Error).message, true),
   });
 
   const empty = kind === "messages" ? !turns.some((t) => t.content.trim()) : !doc.text.trim();
+  const maxChars = file?.max_chars ?? 400_000;
+  const tooLarge = kind === "text" && doc.text.length > maxChars;
   const setTurn = (i: number, patch: Partial<Turn>) => setTurns((ts) => ts.map((t, j) => (j === i ? { ...t, ...patch } : t)));
 
   return (
@@ -73,7 +98,7 @@ export function AddPage() {
       <div className="page-head">
         <div>
           <h1>Add memory</h1>
-          <p>Paste a conversation or a document. memx extracts facts, sorts them, checks them against what <code>{scope}</code> already knows, and shows you every step.</p>
+          <p>Paste a conversation, or paste or upload a document (PDF or text). memx extracts facts, sorts them, checks them against what <code>{scope}</code> already knows, and shows you every step.</p>
         </div>
       </div>
       <div className="split">
@@ -84,7 +109,8 @@ export function AddPage() {
             { value: "text", label: "Document", icon: <FileText /> },
           ]} />}
         >
-          <form className="stack" onSubmit={(e) => { e.preventDefault(); if (!empty) run.mutate(); }}>
+          <form className={`stack drop-target${dragging ? " dragging" : ""}`} onSubmit={(e) => { e.preventDefault(); if (!empty && !tooLarge) run.mutate(); }} {...dropProps}>
+            {dragging && <div className="drop-hint"><Upload /> Drop a PDF or text file to read it as a document</div>}
             <ScopeField />
             {kind === "messages" ? (
               <>
@@ -114,8 +140,26 @@ export function AddPage() {
               </>
             ) : (
               <>
+                <input ref={picker} type="file" hidden accept={DOC_ACCEPT} onChange={(e) => { pick(e.target.files); e.target.value = ""; }} />
+                <div className="row">
+                  <button type="button" className="btn sm" onClick={() => picker.current?.click()} disabled={upload.isPending}>
+                    {upload.isPending ? <><Sparkles className="spin" /> Reading file…</> : <><Upload /> Upload PDF or text file</>}
+                  </button>
+                  {file ? (
+                    <span className="file-chip" title="The text below was read from this file. Edit it before adding if you like.">
+                      <FileText /> <b>{file.filename}</b>
+                      <span className="muted">{fileFacts(file)}</span>
+                      <button type="button" className="btn ghost icon-btn" aria-label="Remove file" onClick={clearFile}><X /></button>
+                    </span>
+                  ) : (
+                    <span className="small muted">or drop one here · .pdf .txt .md .csv .json</span>
+                  )}
+                </div>
                 <label className="field"><span>Document text</span>
-                  <textarea id="doc" className="textarea" rows={10} value={doc.text} onChange={(e) => setDoc({ ...doc, text: e.target.value })} placeholder="Paste notes, a wiki page, meeting minutes…" />
+                  <textarea id="doc" className="textarea" rows={10} value={doc.text} onChange={(e) => setDoc({ ...doc, text: e.target.value })} placeholder="Paste notes, a wiki page, meeting minutes… or upload a file above" />
+                  <small style={tooLarge ? { color: "var(--danger)" } : undefined}>
+                    {doc.text.length.toLocaleString()} characters{tooLarge ? ` — over the ${maxChars.toLocaleString()} limit; trim it or split the file` : doc.text.length > 10_000 ? ` · read in about ${Math.ceil(doc.text.length / 9000)} windows` : ""}
+                  </small>
                 </label>
                 <div className="grid cols-2">
                   <label className="field"><span>Source label</span>
@@ -123,7 +167,7 @@ export function AddPage() {
                   </label>
                   <label className="field"><span>Trust · {doc.trust.toFixed(1)}</span>
                     <input id="trust" type="range" min={0} max={1} step={0.1} value={doc.trust} onChange={(e) => setDoc({ ...doc, trust: Number(e.target.value) })} />
-                    <small>Lower trust ranks these facts lower at recall time.</small>
+                    <small>Lower trust ranks these facts lower at recall time.{settings.data && settings.data.effective.text_trust.from !== "default" ? ` Starts at ${scopeTrust?.toFixed(1)}, this scope's setting.` : ""}</small>
                   </label>
                 </div>
               </>
@@ -134,7 +178,7 @@ export function AddPage() {
             </label>
             <div className="row end">
               <span className="small muted">Into <code>{scope}</code></span>
-              <button className="btn primary" type="submit" disabled={empty || run.isPending}>
+              <button className="btn primary" type="submit" disabled={empty || tooLarge || run.isPending}>
                 {run.isPending ? <><Sparkles className="spin" /> Extracting and reconciling…</> : <>Add to memory <ArrowRight /></>}
               </button>
             </div>
@@ -159,7 +203,32 @@ export function AddPage() {
   );
 }
 
+const DOC_ACCEPT = ".pdf,.txt,.md,.markdown,.rst,.csv,.tsv,.json,.log,application/pdf,text/plain,text/markdown,text/csv";
+
+function fileFacts(f: ExtractedDocument): string {
+  const parts = [];
+  if (f.pages) parts.push(`${f.pages} page${f.pages > 1 ? "s" : ""}`);
+  if (f.empty_pages) parts.push(`${f.empty_pages} without text`);
+  parts.push(`${f.chars.toLocaleString()} characters`);
+  return parts.join(" · ");
+}
+
 // ---------------------------------------------------------------- explanations
+
+function entityHelp(e: EntityPlanRow): string {
+  const how = (h?: string) => (h ? ` (${h})` : "");
+  const compared = (e.candidates ?? []).map((c) => `“${c.with}”${how(c.how)}: Jev ${pct(c.p_same)} same`).join("; ");
+  const aka = e.aka?.length ? ` Haiku suggested it is also called ${e.aka.map((a) => `“${a}”`).join(", ")}.` : "";
+  let text: string;
+  if (e.action === "alias") text = `“${e.name}” is the same as known “${e.merge?.with}”${how(e.merge?.how)}, Jev ${pct(e.merge?.p_same)} sure; merged as another spelling.`;
+  else if (e.action === "link" && e.merge?.kept_by_default) text = `Same name as a known “${e.merge.with}”. Jev was unsure (${pct(e.merge.p_same)} same) but not sure it is someone else, so it stays with the known one.`;
+  else if (e.action === "link" && e.merge) text = `Same name as a known “${e.merge.with}”; Jev confirmed it is the same one (${pct(e.merge.p_same)}).`;
+  else if (e.action === "link") text = `Already known${e.canonical && e.canonical !== e.name ? ` as “${e.canonical}”` : ""}.`;
+  else if (e.variant) text = `Same name as a known “${e.merge?.with}”, but Jev judged it a different one (${pct(e.merge?.p_same)} same); stored as a second “${e.name}”.`;
+  else if (e.merge) text = `New entity. Jev judged it different from “${e.merge.with}”${how(e.merge.how)} (${pct(e.merge.p_same)} same).`;
+  else text = "New entity; nothing similar was known.";
+  return `${text}${compared && (e.candidates?.length ?? 0) > 1 ? ` Compared with ${compared}.` : ""}${aka}`;
+}
 
 function decisionText(c: TraceCandidate, facts: Record<string, Fact>, bandHigh: number): string {
   const v = c.verdicts ?? [];
@@ -200,13 +269,13 @@ function decisionText(c: TraceCandidate, facts: Record<string, Fact>, bandHigh: 
 function SimAxis({ neighbors, low, high }: { neighbors: Neighbor[]; low: number; high: number }) {
   const tip = useTip();
   const color = (b: Neighbor["band"]) =>
-    b === "judge" ? "var(--indigo)" : b === "auto" || b === "exact" ? "var(--ok)" : "var(--faint)";
+    b === "judge" ? "var(--accent)" : b === "auto" || b === "exact" ? "var(--ok)" : "var(--faint)";
   const top = neighbors.reduce<Neighbor | null>((a, n) => (!a || n.sim > a.sim ? n : a), null);
   return (
     <div>
       <div className="simaxis" aria-label="Neighbor similarity">
         <div className="track" />
-        <div className="zone" style={{ left: `${low * 100}%`, width: `${(high - low) * 100}%`, background: "var(--indigo-weak)" }} />
+        <div className="zone" style={{ left: `${low * 100}%`, width: `${(high - low) * 100}%`, background: "var(--accent-weak)" }} />
         <div className="zone" style={{ left: `${high * 100}%`, right: 0, background: "var(--ok-bg)" }} />
         {[low, high].map((t) => <div key={t} className="tick" style={{ left: `${t * 100}%` }}><span>{t.toFixed(2)}</span></div>)}
         <span className="end l">0</span><span className="end r">1</span>
@@ -217,7 +286,7 @@ function SimAxis({ neighbors, low, high }: { neighbors: Neighbor[]; low: number;
       </div>
       <div className="legend" style={{ marginTop: 18 }}>
         <span className="item"><span className="dot" style={{ background: "var(--faint)" }} />below {low}: unrelated</span>
-        <span className="item"><span className="dot" style={{ background: "var(--indigo)" }} />{low}–{high}: Jev decides</span>
+        <span className="item"><span className="dot" style={{ background: "var(--accent)" }} />{low}–{high}: Jev decides</span>
         <span className="item"><span className="dot" style={{ background: "var(--ok)" }} />above {high}: duplicate if no new words</span>
       </div>
     </div>
@@ -260,7 +329,7 @@ function PathDiagram({ trace }: { trace: IngestTrace }) {
         kicker: <><Boxes /> Window {w.index + 1}</>, title: `${w.extracted ?? 0} facts extracted`,
         body: `${w.units} unit${w.units === 1 ? "" : "s"} · ${w.chars.toLocaleString()} chars${w.context_units ? ` · ${w.context_units} context` : ""}`, width: 210,
       } });
-      edge(`in-w${w.index}`, "input", `w${w.index}`, { color: "var(--indigo)" });
+      edge(`in-w${w.index}`, "input", `w${w.index}`, { color: "var(--accent)" });
     });
     cands.forEach((c) => {
       const y = candY.get(c.index)!;
@@ -283,8 +352,8 @@ function PathDiagram({ trace }: { trace: IngestTrace }) {
       if (c.fact_id) effects.push({ id: c.fact_id, label: c.outcome === "superseded_on_arrival" ? "stored as history" : "new fact", color: "var(--ok)" });
       if (c.same_as) effects.push({ id: c.same_as, label: "reinforced", color: "var(--muted)" });
       (c.superseded_ids ?? []).forEach((id) => effects.push({ id, label: "replaced", color: "var(--warn)" }));
-      (c.shadowed_ids ?? []).forEach((id) => effects.push({ id, label: "shadowed here", color: "var(--purple)" }));
-      (c.related_ids ?? []).forEach((id) => effects.push({ id, label: "related", color: "var(--indigo)" }));
+      (c.shadowed_ids ?? []).forEach((id) => effects.push({ id, label: "shadowed here", color: "var(--accent-2)" }));
+      (c.related_ids ?? []).forEach((id) => effects.push({ id, label: "related", color: "var(--accent)" }));
       if (c.superseded_by) effects.push({ id: c.superseded_by, label: "already covers it", color: "var(--muted)" });
       effectY = Math.max(effectY, y);
       effects.forEach((e, k) => {
@@ -357,10 +426,7 @@ function CandidateCard({ c, trace }: { c: TraceCandidate; trace: IngestTrace }) 
             {(c.entities ?? []).length ? (
               <div className="row" style={{ gap: 4 }}>
                 {(c.entities ?? []).map((e) => (
-                  <span key={e.name} className="chip ent" title={
-                    e.action === "alias" ? `“${e.name}” merged into “${e.canonical}” (Jev ${pct(e.merge?.p_same)} same)`
-                    : e.action === "link" ? `Already known${e.canonical && e.canonical !== e.name ? ` as “${e.canonical}”` : ""}`
-                    : e.action === "create" ? "New entity" : e.merge ? `Kept separate from “${e.merge.with}” (Jev ${pct(e.merge.p_same)} same)` : ""}>
+                  <span key={e.name} className="chip ent" title={entityHelp(e)}>
                     {e.canonical && e.canonical !== e.name ? <>{e.name} <span className="faint">→ {e.canonical}</span></> : e.name}
                     <span className="faint">{e.type}</span>
                   </span>
@@ -384,7 +450,13 @@ function CandidateCard({ c, trace }: { c: TraceCandidate; trace: IngestTrace }) 
                         <span className="num">sim {n.sim.toFixed(3)}</span>
                         <span>· {BAND_META[n.band].label}</span>
                         {n.scope !== trace.ingest.scope && <span className="mono">· {n.scope}</span>}
-                        {v && <Pill tone={v.label === "unrelated" ? "muted" : v.label === "same" ? "ok" : "accent"}>{VERDICT_LABEL[v.label]} {v.source === "jev" ? pct(v.probability) : ""}</Pill>}
+                        {v && (v.acted && v.acted !== v.label ? (
+                          <Pill tone="warn" title={`Jev said “${VERDICT_LABEL[v.label]}” (${pct(v.probability)}), but ${HELD_REASON[v.reason ?? ""] ?? "a rule held it back"}.`}>
+                            {VERDICT_LABEL[v.label]} {pct(v.probability)} · held back → {VERDICT_LABEL[v.acted]}
+                          </Pill>
+                        ) : (
+                          <Pill tone={v.label === "unrelated" ? "muted" : v.label === "same" ? "ok" : "accent"}>{VERDICT_LABEL[v.label]} {v.source === "jev" ? pct(v.probability) : ""}</Pill>
+                        ))}
                       </div>
                     </div>
                   );
@@ -399,9 +471,14 @@ function CandidateCard({ c, trace }: { c: TraceCandidate; trace: IngestTrace }) 
           {c.fact_id && <div className="small">Stored as {link(c.fact_id)}</div>}
           {(c.superseded_ids ?? []).map((id) => <div key={id} className="small">Replaced: {link(id)}{trace.facts[id] && trace.facts[id].scope !== trace.ingest.scope && <span className="mono faint"> · {trace.facts[id].scope}</span>}</div>)}
           {(c.shadowed_ids ?? []).map((id) => <div key={id} className="small">Hidden here: {link(id)}</div>)}
+          {(c.verdicts ?? []).filter((v) => v.acted && v.acted !== v.label && v.label !== "same").map((v) => (
+            <div key={`held-${v.neighbor_id}`} className="small">
+              Held back, both kept: {link(v.neighbor_id)} <span className="muted">— Jev said “{VERDICT_LABEL[v.label]}” ({pct(v.probability)}), but {HELD_REASON[v.reason ?? ""] ?? "a rule held it back"}.</span>
+            </div>
+          ))}
           {(c.verdicts ?? []).filter((v) => v.source === "jev").length > 0 && (
             <details>
-              <summary className="small" style={{ cursor: "pointer", color: "var(--indigo)" }}>Jev's full verdict probabilities</summary>
+              <summary className="small" style={{ cursor: "pointer", color: "var(--accent)" }}>Jev's full verdict probabilities</summary>
               <div className="stack" style={{ marginTop: 8 }}>
                 {(c.verdicts ?? []).filter((v) => v.source === "jev").map((v) => (
                   <div key={v.neighbor_id} className="stack" style={{ gap: 4 }}>
@@ -423,8 +500,8 @@ function Timings({ t }: { t?: Record<string, number> }) {
   const tip = useTip();
   if (!t) return null;
   const parts = [
-    ["Extract", t.extract_ms, "var(--indigo)"], ["Embed", t.embed_ms, "var(--cat-identity)"],
-    ["Sort", t.sort_ms, "var(--purple)"], ["Reconcile + commit", t.reconcile_commit_ms, "var(--cat-preference)"],
+    ["Extract", t.extract_ms, "var(--accent)"], ["Embed", t.embed_ms, "var(--cat-identity)"],
+    ["Sort", t.sort_ms, "var(--accent-2)"], ["Reconcile + commit", t.reconcile_commit_ms, "var(--cat-preference)"],
   ] as const;
   const total = Math.max(1, t.total_ms);
   return (

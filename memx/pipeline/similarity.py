@@ -65,3 +65,59 @@ def lexical_guard(candidate: str, existing: str, min_jaccard: float = 0.8) -> bo
     if set(_NUMBER.findall(candidate)) != set(_NUMBER.findall(existing)):
         return False
     return True
+
+
+# A statement about an earlier state ("the previous channel was #ops") must not retire the current one.
+_PAST = re.compile(
+    r"\b(previous(ly)?|formerly|used to|originally|before (that|switching|moving|the change)"
+    r"|old (value|channel|address|number|email|role|status))\b"
+)
+# "is used to cold weather" (accustomed) and "is used to deploy" (purpose) are present tense.
+_NOT_PAST = re.compile(r"\b(is|are|am|be|been|being|was|were|get|gets|got|getting)\s+used to\b")
+# ...unless it also states the new value: "moved from Porto to Lisbon", "previously X, now Y".
+_PRESENT = re.compile(r"\b(now|currently|instead|switched to|moved to|changed to|replaced (by|with))\b|\bfrom\b.+\bto\b")
+
+
+def is_past_statement(text: str) -> bool:
+    """True when a statement is only about an earlier state, not the current one."""
+    lowered = _NOT_PAST.sub(" ", text.lower().replace("’", "'"))
+    return bool(_PAST.search(lowered)) and not _PRESENT.search(lowered)
+
+
+_ATTR_STOP = STOPWORDS | {"user", "users", "current", "new", "old", "previous", "personal", "detail", "details",
+                          "info", "information", "general"}
+
+
+def _forms(word: str) -> set[str]:
+    """The word plus its possible singulars, so "classes"/"class", "statuses"/"status" and "houses"/"house" meet."""
+    forms = {word}
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        forms.add(word[:-1])
+        if word.endswith("es"):
+            forms.add(word[:-2])
+        if word.endswith("ies"):
+            forms.add(word[:-3] + "y")
+    return forms
+
+
+def _attr_words(label: str) -> set[str]:
+    return {form for t in _tokens(label) if t not in _ATTR_STOP for form in _forms(t)}
+
+
+def attributes_compatible(a: str | None, b: str | None) -> bool:
+    """False only when both facts name an attribute and the labels share no content word.
+
+    Different words can still name one attribute ("location" / "city of residence"), so reconcile asks Jev before
+    acting on a False here; see ``reconcile.same_attribute_question``.
+
+    The extractor names one attribute per fact ("frequent flyer status", "reading progress"). Two facts about
+    different attributes ("page count" vs "reading progress") can both be true, so neither may replace the
+    other. Labels are free text, so any shared word ("status" / "frequent flyer status") counts as compatible,
+    and a missing label never blocks anything.
+    """
+    if not a or not b:
+        return True
+    ta, tb = _attr_words(a), _attr_words(b)
+    if not ta or not tb:
+        return True
+    return bool(ta & tb)

@@ -88,6 +88,10 @@ class JobRunner:
             await handler(job["payload"])
         except asyncio.CancelledError:
             raise  # lease expiry will requeue it
+        except queue.Deferred as wait:
+            async with self.ctx.pool.connection() as conn:
+                await queue.defer(conn, job["id"], wait.seconds)
+            return
         except Exception as exc:  # noqa: BLE001
             retryable = exc.retryable if isinstance(exc, ProviderError) else not isinstance(
                 exc, (ValidationError, ValueError, TypeError, KeyError))

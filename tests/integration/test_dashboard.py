@@ -76,3 +76,24 @@ async def test_graph_scopes_stats_and_lists(client):
     assert len(ingests) == 2 and ingests[0]["preview"].startswith("user: The user prefers light")
     assert (await client.get("/v1/config")).json()["bands"]["low"] == 0.45
     assert len((await client.get("/v1/jobs")).json()) == 2
+
+
+async def test_document_extract_reads_a_pdf_then_ingests_as_text(client):
+    from tests.unit.test_documents import make_pdf
+
+    pdf = make_pdf(["The user prefers dark mode in dashboards.", "The user likes espresso."])
+    r = await client.post("/v1/documents/extract", params={"filename": "prefs.pdf"}, content=pdf,
+                          headers={"Content-Type": "application/pdf"})
+    assert r.status_code == 200, r.text
+    doc = r.json()
+    assert doc["kind"] == "pdf" and doc["pages"] == 2 and doc["filename"] == "prefs.pdf" and not doc["too_large"]
+    assert doc["chars"] == len(doc["text"]) and "espresso" in doc["text"]
+    body = {"input": {"kind": "text", "text": doc["text"], "source": doc["filename"]}, "mode": "inline"}
+    receipt = (await client.post(f"/v1/scopes/{SCOPE}/ingests", json=body)).json()
+    assert receipt["added"] == 2
+
+
+async def test_document_extract_refuses_bad_files(client):
+    r = await client.post("/v1/documents/extract", params={"filename": "deck.pptx"}, content=b"PK\x03\x04")
+    assert r.status_code == 422 and "only PDF" in r.json()["detail"]
+    assert (await client.post("/v1/documents/extract", content=b"")).status_code == 422

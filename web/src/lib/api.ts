@@ -82,6 +82,7 @@ export interface Receipt {
   superseded: number;
   shadowed: number;
   rejected: number;
+  held_back?: number;
   facts: Fact[] | null;
   error: string | null;
 }
@@ -115,11 +116,15 @@ export interface Neighbor {
   band: Band;
 }
 
+export type HeldReason = "below_floor" | "different_attribute" | "same_window" | "past_statement";
+
 export interface VerdictRow {
   neighbor_id: string;
   label: "same" | "candidate_replaces" | "neighbor_covers" | "related" | "unrelated";
   probability: number;
   probabilities: Record<string, number>;
+  acted?: VerdictRow["label"];  // what memx did, when a floor or rule held Jev's label back
+  reason?: HeldReason;
   source: "hash" | "auto" | "jev";
   sim: number;
 }
@@ -143,6 +148,7 @@ export interface TraceCandidate {
   superseded_ids?: string[];
   shadowed_ids?: string[];
   related_ids?: string[];
+  possible_replace_ids?: string[];
   superseded_by?: string | null;
   category?: Category;
   topic?: string | null;
@@ -187,7 +193,11 @@ export interface EntityPlanRow {
   action: "link" | "alias" | "create" | "skip";
   canonical?: string;
   entity_id?: string;
-  merge?: { with: string; entity_id: string; p_same: number; probabilities: Record<string, number>; latency_ms: number };
+  merge?: { with: string; entity_id: string; how?: string; p_same: number; probabilities: Record<string, number>; latency_ms: number;
+    kept_by_default?: boolean };
+  candidates?: { with: string; entity_id: string; how: string; p_same: number }[];
+  aka?: string[];
+  variant?: boolean;
 }
 
 export type CandidateStatus = "picked" | "below_floor" | "over_budget" | "over_k" | "shadowed" | "not_graded";
@@ -335,12 +345,16 @@ export interface Config {
   models: { extractor: string; embedding: string; judge: string };
   insert_mode: string;
   bands: { low: number; high: number; guard_min_jaccard: number };
-  verdict: { same_min: number; min_prob: number };
+  verdict: {
+    same_min: number; replace_min: number; covers_min: number; min_prob: number | null;
+    confirm: boolean; confirm_band: [number, number];
+  };
   sort: { min_prob: number; min_confidence: number; injection_flag: number; injection_reject: number };
   recall: { budget_tokens: number; budget_safety: number; grade_floor: number; k_max: number; grade_max: number; grade_enabled: boolean };
   decay: { half_lives: Record<string, number | null>; access_boost_cap: number };
   trust: { user: number; assistant: number; text_default: number };
   window_tokens: number;
+  event_ttl_days: number | null;
   categories: { key: Category; definition: string }[];
   entities: { enabled: boolean; merge_min: number; topic_min: number };
   walk: { enabled: boolean; hops: number; decay: number; cap: number; seeds: number; hub_share: number; hub_min_degree: number; topic_weight: number; score_factor: number; grade_floor: number };
@@ -366,6 +380,25 @@ export function setToken(value: string) {
   }
 }
 
+export type ExtractedDocument = {
+  text: string;
+  kind: "pdf" | "text";
+  filename: string | null;
+  pages: number | null;
+  empty_pages: number;
+  chars: number;
+  max_chars: number;
+  too_large: boolean;
+};
+
+export type ScopeSettingKey = "budget_tokens" | "event_ttl_days" | "text_trust" | "walk_enabled";
+export type ScopeSettingValue = number | boolean | null;
+export type ScopeSettings = {
+  scope: string;
+  own: Partial<Record<ScopeSettingKey, ScopeSettingValue>>;
+  effective: Record<ScopeSettingKey, { value: ScopeSettingValue; from: string; default: ScopeSettingValue; env: string }>;
+};
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -376,8 +409,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const raw = body instanceof Blob;
+  if (body !== undefined) headers["Content-Type"] = raw ? body.type || "application/octet-stream" : "application/json";
+  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : raw ? body : JSON.stringify(body) });
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -424,6 +458,10 @@ export const api = {
     request<Receipt>("POST", `/v1/scopes/${enc(scope)}/ingests`, {
       input, mode: "inline", observed_at: observedAt || undefined,
     }),
+  scopeSettings: (scope: string) => request<ScopeSettings>("GET", `/v1/scopes/${enc(scope)}/settings`),
+  setScopeSettings: (scope: string, changes: Partial<Record<ScopeSettingKey, ScopeSettingValue | null>>) =>
+    request<ScopeSettings>("PATCH", `/v1/scopes/${enc(scope)}/settings`, changes),
+  extractDocument: (file: File) => request<ExtractedDocument>("POST", `/v1/documents/extract${q({ filename: file.name })}`, file),
   recall: (scope: string, body: { query?: string; budget_tokens?: number; force_mode?: "full" | "ranked"; as_of?: string; categories?: Category[] }) =>
     request<RecallResult>("POST", `/v1/scopes/${enc(scope)}/recall`, { ...body, explain: true }),
   deleteFact: (id: string) => request<unknown>("DELETE", `/v1/facts/${id}`),

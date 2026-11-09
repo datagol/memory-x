@@ -12,6 +12,14 @@ from psycopg.types.json import Jsonb
 CHANNEL = "memx_jobs"
 
 
+class Deferred(Exception):
+    """Raised by a job handler that is waiting on something external; the runner re-queues it for later."""
+
+    def __init__(self, seconds: float, reason: str = ""):
+        super().__init__(reason or f"deferred {seconds:.0f}s")
+        self.seconds = seconds
+
+
 async def enqueue(conn: AsyncConnection, kind: str, payload: dict[str, Any], key: str, *,
                   max_attempts: int = 5, lease_seconds: int = 300, status: str = "queued",
                   run_after: datetime | None = None) -> int | None:
@@ -75,6 +83,18 @@ async def fail(conn: AsyncConnection, job: dict[str, Any], error: str, *, retrya
             (error[:2000], delay, job["id"]),
         )
     return dead
+
+
+async def defer(conn: AsyncConnection, job_id: int, seconds: float) -> None:
+    """Put a running job back to wait for something external (a provider batch). Does not use up an attempt."""
+    await conn.execute(
+        """
+        UPDATE memx_job SET status = 'queued', locked_at = NULL, locked_by = NULL, attempts = greatest(attempts - 1, 0),
+               run_after = now() + make_interval(secs => %s)
+         WHERE id = %s
+        """,
+        (seconds, job_id),
+    )
 
 
 async def reap(conn: AsyncConnection) -> int:

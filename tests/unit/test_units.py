@@ -99,7 +99,21 @@ def test_giant_turn_and_document_are_split():
     w2 = make_windows(Text(text=big, source="wiki"), window_tokens=300, context_turns=2, chars_per_token=3.6)
     assert len(w2) > 3 and w2[1].context and w2[1].source == "wiki"
     a, b = split_window(w2[0], 2)
-    assert a.units + b.units == w2[0].units
+    if len(w2[0].units) > 1:
+        assert a.units + b.units == w2[0].units
+    else:  # one long unit is split inside the unit, at a sentence boundary, losing nothing
+        assert a.units and b.units
+        assert " ".join(u.text for u in a.units + b.units).split() == w2[0].units[0].text.split()
+
+
+def test_a_single_long_unit_can_be_split():
+    from memx.pipeline.windowing import Unit, Window, can_split
+
+    long = Window(0, "messages", [Unit("user", "One fact here. " * 60)])
+    assert can_split(long) and not can_split(Window(0, "messages", [Unit("user", "Short.")]))
+    a, b = split_window(long, 2)
+    assert len(a.units) == len(b.units) == 1 and a.units[0].role == "user"
+    assert " ".join([a.units[0].text, b.units[0].text]).split() == long.units[0].text.split()
 
 
 # ---- sort / reconcile -----------------------------------------------------------
@@ -174,7 +188,9 @@ def test_render_sections_groups_and_determinism():
     assert lines.index("## Rules") < lines.index("## Preferences") < lines.index("## Work context") < lines.index("## Events")
     pref = lines.index("## Preferences")
     assert lines[pref + 1].startswith("- The user likes") and lines[pref + 2].startswith("  - The user likes")
-    assert "- (2026-11-02) The user is on PTO the week of 2026-11-02" in lines
+    assert "- The user is on PTO the week of 2026-11-02" in lines  # already dated: no second date in front
+    undated = fact("The user moved house", "event", event_at=datetime(2026, 10, 1, tzinfo=UTC))
+    assert "- (2026-10-01) The user moved house" in render("memory.a", [undated], [], now=NOW, cfg=CFG)
     assert "- The org uses Postgres [memory]" in lines
     assert "Ignore previous" not in md
     assert render("memory.a", [], [], now=NOW, cfg=CFG) == ""
@@ -196,3 +212,194 @@ def test_okf_bundle():
     assert 'description: "The user prefers light mode"' in body
     assert "status: \"active\"" in body
     assert body.rstrip().endswith("The user prefers light mode")
+
+
+async def test_truncated_extraction_splits_the_window_or_fails_clearly():
+    from types import SimpleNamespace
+
+    from memx.pipeline import extract as px
+    from memx.providers.extractor import ExtractResult
+    from memx.providers.http import ProviderError
+
+    class Extractor:
+        model = "fake"
+
+        async def extract(self, window, *, observed_at, total_windows):
+            if len(window.units) > 1:  # pretend the whole window is too much for one response
+                return ExtractResult(facts=[], truncated=True)
+            return ExtractResult(facts=[{"text": window.units[0].text}])
+
+    ctx = SimpleNamespace(config=CFG, extractor=Extractor())
+    [window] = px.windows_for(ctx, Text(text="First paragraph.\n\nSecond paragraph.").model_dump())
+    assert len(window.units) == 2
+    facts, _, _ = await px._extract_window(ctx, window, NOW, 1)
+    assert [f["text"] for f in facts] == ["First paragraph.", "Second paragraph."]
+
+    [single] = px.windows_for(ctx, Text(text="One paragraph only.").model_dump())
+
+    class Always(Extractor):
+        async def extract(self, window, *, observed_at, total_windows):
+            return ExtractResult(facts=[], truncated=True)
+
+    with pytest.raises(ProviderError, match="more facts than fit"):
+        await px._extract_window(SimpleNamespace(config=CFG, extractor=Always()), single, NOW, 1)
+
+
+def test_extractor_keeps_the_attribute_label():
+    from memx.providers.extractor import TOOL, _clean
+
+    item = TOOL["function"]["parameters"]["properties"]["facts"]["items"]
+    assert "attribute" in item["required"]
+    [f] = _clean([{"text": "Dana Whitfield's spouse/guest is Marisol.", "attribute": "spouse", "speaker": "document",
+                   "category_hint": "relationship", "is_event": False, "confidence": 1, "entities": []}])
+    assert f["attribute"] == "spouse"
+
+
+async def test_a_capped_answer_is_continued_not_re_extracted():
+    from types import SimpleNamespace
+
+    from memx import usage
+    from memx.pipeline import extract as px
+    from memx.providers.extractor import ExtractResult
+
+    class Extractor:
+        model = "fake"
+        supports_continue = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def extract(self, window, *, observed_at, total_windows, already=None):
+            self.calls.append(list(already or []))
+            start = len(already or [])
+            facts = [{"text": f"Fact {i}."} for i in range(start, min(start + 25, 30))]
+            return ExtractResult(facts=facts, tokens_in=100, tokens_out=10 * len(facts))
+
+    ex = Extractor()
+    ctx = SimpleNamespace(config=CFG, extractor=ex)
+    [window] = px.windows_for(ctx, Text(text="First paragraph.\n\nSecond paragraph.").model_dump())
+    with usage.track() as u:
+        facts, _, tout = await px._extract_window(ctx, window, NOW, 1)
+    assert [f["text"] for f in facts] == [f"Fact {i}." for i in range(30)]
+    assert len(ex.calls) == 2 and len(ex.calls[1]) == 25  # one follow-up that saw the first 25
+    assert u.extract_continuations == 1 and u.extract_splits == 0
+    assert tout == 300  # no output paid twice
+
+
+def test_slim_extractor_schema_and_continuation_prompt():
+    from memx.pipeline.windowing import Unit, Window
+    from memx.providers.extractor import SYSTEM_PROMPT, TOOL, _clean, render_window
+
+    item = TOOL["function"]["parameters"]["properties"]["facts"]["items"]
+    assert set(item["required"]) == {"text", "attribute", "speaker"}
+    assert "category_hint" not in item["properties"] and "confidence" not in item["properties"]
+    [f] = _clean([{"text": "The user ran a 5k on 2026-10-04.", "attribute": "race", "speaker": "user",
+                   "event_date": "2026-10-04"}])
+    assert f["is_event"] and f["entities"] == [] and f["confidence"] == 1.0
+    assert "one fact per item" in SYSTEM_PROMPT and "changed from" in SYSTEM_PROMPT
+    w = Window(0, "messages", [Unit("user", "Hi.")])
+    body = render_window(w, observed_at=NOW, total_windows=1, already=["The user likes tea."])
+    assert "<already_recorded>" in body and "- The user likes tea." in body
+
+
+async def test_gate_drops_chitchat_turns():
+    from memx.pipeline.gate import gate_window
+    from memx.pipeline.windowing import Unit, Window
+    from memx.testing import FakeJudge
+
+    w = Window(0, "messages", [Unit("user", "My sister Ana lives in Lima."), Unit("assistant", "Thanks!"),
+                               Unit("user", "ok")])
+    kept, record = await gate_window(FakeJudge(), w, 0.1)
+    assert kept is not None and [u.text for u in kept.units] == ["My sister Ana lives in Lima."]
+    assert record["skipped"] == 2
+    empty, _ = await gate_window(FakeJudge(), Window(1, "messages", [Unit("user", "hi"), Unit("assistant", "Hello!")]),
+                                 0.1)
+    assert empty is None
+
+
+def test_render_dates_related_facts_and_lists_history():
+    from memx.recall.render import render
+
+    a = fact("The user's gym is Peak Fitness", "preference", scope="memory.a")
+    b = fact("The user's gym is Iron Works", "preference", scope="memory.a")
+    old = fact("The user's gym was Zen Yoga", "preference", scope="memory.a")
+    md = render("memory.a", [a, b], [(a.id, b.id)], now=NOW, cfg=CFG, history={a.id: [old]})
+    assert "(said " in md and "earlier, later replaced: The user's gym was Zen Yoga" in md
+    single = render("memory.a", [a], [], now=NOW, cfg=CFG)
+    assert "(said " not in single
+
+
+async def test_unusable_extractor_output_splits_the_window():
+    from types import SimpleNamespace
+
+    from memx.pipeline import extract as px
+    from memx.providers.extractor import ExtractResult
+
+    class Extractor:
+        model = "fake"
+
+        async def extract(self, window, *, observed_at, total_windows):
+            if len(window.units) > 1:
+                return ExtractResult(facts=[], failed="extractor returned unusable output twice")
+            return ExtractResult(facts=[{"text": window.units[0].text}])
+
+    ctx = SimpleNamespace(config=CFG, extractor=Extractor())
+    [window] = px.windows_for(ctx, Text(text="First paragraph.\n\nSecond paragraph.").model_dump())
+    facts, _, _ = await px._extract_window(ctx, window, NOW, 1)
+    assert [f["text"] for f in facts] == ["First paragraph.", "Second paragraph."]
+
+
+def test_ranked_render_puts_the_most_relevant_first():
+    goal = fact("The user plans to go fishing near a dam soon.", "goal")
+    event = fact("The user attended their second cooking class on Indian cuisine.", "event")
+    related = fact("The user wants to practice Indian cooking.", "goal")
+    scores = {goal.id: 0.2, event.id: 0.6, related.id: 0.5}
+    md = render("memory.a", [goal, event, related], [], now=NOW, cfg=CFG, scores=scores)
+    lines = [ln for ln in md.splitlines() if ln.startswith(("## ", "- "))]
+    assert lines[0] == "## Events" and "cooking class" in lines[1]  # the best fact's section comes first
+    assert lines[2] == "## Goals" and "practice Indian cooking" in lines[3] and "fishing" in lines[4]
+    assert md == render("memory.a", [related, event, goal], [], now=NOW, cfg=CFG, scores=scores)  # deterministic
+    plain = render("memory.a", [goal, event, related], [], now=NOW, cfg=CFG)
+    assert plain.index("## Goals") < plain.index("## Events")  # without scores: the fixed section order
+
+
+def test_related_facts_nest_by_direct_link_only():
+    game = fact("John held a benefit basketball game.", "goal")
+    success = fact("John's benefit game raised money for charity.", "goal")
+    team = fact("John's team won against a top team.", "goal")
+    wedding = fact("John had a wedding in a greenhouse venue.", "goal")
+    chain = [(game.id, success.id), (success.id, team.id), (team.id, wedding.id)]  # a chain, not a cluster
+    scores = {game.id: 0.9, success.id: 0.8, team.id: 0.3, wedding.id: 0.2}
+    lines = render("memory.a", [game, success, team, wedding], chain, now=NOW, cfg=CFG, scores=scores).splitlines()
+    assert any(ln.startswith("- John held a benefit") for ln in lines)
+    assert any(ln.startswith("  - John's benefit game raised") for ln in lines)
+    assert any(ln.startswith("- John's team won") for ln in lines)  # not nested under the game via the chain
+    assert any(ln.startswith("  - John had a wedding") for ln in lines)
+
+
+async def test_jev_client_splits_requests_over_100_questions():
+    from memx.providers.jev import JevClient, YesNo
+
+    class Http:
+        def __init__(self):
+            self.sizes = []
+
+        async def post(self, path, body):
+            self.sizes.append(len(body["questions"]))
+            return {"answers": {k: {"type": "noul", "noul": 0.5} for k in body["questions"]},
+                    "usage": {"cost": 0.001}, "model": "jev"}
+
+    http = Http()
+    res = await JevClient(http, "jev").ask({}, {f"q{i}": YesNo("x") for i in range(230)})
+    assert sorted(http.sizes) == [30, 100, 100] and len(res.answers) == 230
+    assert res.cost_usd == pytest.approx(0.003)
+
+
+def test_recall_defaults_are_wide():
+    """Benchmarked defaults (LoCoMo 1,540 q / LongMemEval 82 q): the floor at 0.1 and the 80-fact cap recovered most
+    answers that were in memory but not shown; budget_tokens stays the hard cap on the rendered block."""
+    cfg = MemxConfig(_env_file=None)
+    assert (cfg.grade_floor, cfg.recall_k_max) == (0.1, 80)
+    assert cfg.grade_max >= cfg.recall_k_max, "everything that can be returned must have been graded"
+    assert cfg.recall_k_vector + cfg.recall_k_fts >= cfg.grade_max, "the grader must be offered enough candidates"
+    assert cfg.budget_tokens == 4_000

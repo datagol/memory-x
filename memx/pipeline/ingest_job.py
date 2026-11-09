@@ -7,10 +7,12 @@ import time
 from typing import Any
 from uuid import UUID
 
+from memx import scope_settings
+from memx import usage as usage_tracker
 from memx.context import Context
 from memx.db import repo
 from memx.pipeline.commit import commit_candidate, db_now, reject_candidate
-from memx.pipeline.entities import EntityPlan, plan_entities
+from memx.pipeline.entities import EntityPlan, is_generic, normalize, plan_entities
 from memx.pipeline.extract import ensure_candidates
 from memx.pipeline.reconcile import Plan, judge_neighbors, plan_from
 from memx.pipeline.sort import SortResult, sort_candidate
@@ -20,7 +22,7 @@ from memx.types import Candidate
 
 def build_receipt(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     receipt = {"added": 0, "dropped": 0, "historical": 0, "superseded": 0, "shadowed": 0, "rejected": 0,
-               "fact_ids": []}
+               "held_back": 0, "fact_ids": []}
     for c in candidates:
         outcome = c.get("outcome")
         if outcome == "added":
@@ -34,6 +36,7 @@ def build_receipt(candidates: list[dict[str, Any]]) -> dict[str, Any]:
             receipt["rejected"] += 1
         receipt["superseded"] += int(c.get("superseded") or 0)
         receipt["shadowed"] += int(c.get("shadowed") or 0)
+        receipt["held_back"] += len(c.get("possible_replace_ids") or [])  # Jev said replace; a rule kept both
     return receipt
 
 
@@ -47,7 +50,8 @@ def sort_trace(sort: SortResult | None) -> dict[str, Any] | None:
 
 
 async def _process(ctx: Context, ingest: dict[str, Any], candidate: Candidate, embedding: list[float],
-                   sort: SortResult | None, scope: str, chain: list[str], settings: dict[str, Any]) -> dict[str, Any]:
+                   sort: SortResult | None, scope: str, chain: list[str], settings: dict[str, Any],
+                   name_vectors: dict[str, list[float]] | None = None) -> dict[str, Any]:
     cfg = ctx.config
     started = time.perf_counter()
     trace: dict[str, Any] = {"sort": sort_trace(sort), "neighbors": []}
@@ -68,8 +72,9 @@ async def _process(ctx: Context, ingest: dict[str, Any], candidate: Candidate, e
                 conn, ctx.judge, cfg, scope=scope, chain=chain, candidate=candidate, category=sort.category,
                 embedding=embedding, observed_at=ingest["observed_at"], considered=trace["neighbors"],
             )
-            plan = plan_from(verdicts, cfg, scope)
-            entities = await plan_entities(conn, ctx.judge, cfg, scope=scope, candidate=candidate)
+            plan = plan_from(verdicts, cfg, scope, candidate, ingest["id"])
+            entities = await plan_entities(conn, ctx.judge, cfg, scope=scope, candidate=candidate,
+                                           vectors=name_vectors, ingest_id=ingest["id"])
         plan.fetched_at = fetched_at
         trace["reconcile_ms"] = int((time.perf_counter() - started) * 1000)
         return await commit_candidate(
@@ -79,9 +84,10 @@ async def _process(ctx: Context, ingest: dict[str, Any], candidate: Candidate, e
         )
 
 
-async def run_ingest(ctx: Context, ingest_id: UUID) -> dict[str, Any] | None:
-    """Process one ingest. Returns the receipt, or None if the ingest was deleted meanwhile."""
-    cfg = ctx.config
+async def run_ingest(ctx: Context, ingest_id: UUID, *, allow_batch: bool = True) -> dict[str, Any] | None:
+    """Process one ingest. Returns the receipt, or None if the ingest was deleted meanwhile.
+
+    ``allow_batch=False`` for a caller that waits for the result (inline insert): never defer to a provider batch."""
     async with ctx.pool.connection() as conn:
         ingest = await repo.get_ingest(conn, ingest_id)
     if ingest is None:
@@ -89,14 +95,23 @@ async def run_ingest(ctx: Context, ingest_id: UUID) -> dict[str, Any] | None:
     if ingest["status"] == "committed":
         return ingest["receipt"]
 
+    with usage_tracker.track() as usage:
+        usage.merge((ingest.get("extract_batch") or {}).get("usage"))  # counted before a batch wait
+        return await _run_tracked(ctx, ingest, usage, allow_batch)
+
+
+async def _run_tracked(ctx: Context, ingest: dict[str, Any], usage: usage_tracker.Usage,
+                       allow_batch: bool = True) -> dict[str, Any] | None:
+    cfg = ctx.config
+    ingest_id = ingest["id"]
     t0 = time.perf_counter()
-    candidates, embeddings = await ensure_candidates(ctx, ingest)
+    candidates, embeddings = await ensure_candidates(ctx, ingest, allow_batch=allow_batch)
     t_extract = time.perf_counter()
     scope = ingest["scope"]
     chain = ScopePath.parse(scope).chain_str()
     async with ctx.pool.connection() as conn:
         await repo.ensure_scope(conn, scope)
-        settings = await repo.scope_settings(conn, scope)
+        settings = (await scope_settings.resolve(conn, cfg, scope)).values
 
     pending = [c for c in candidates if c.outcome is None]
     missing = [c for c in pending if c.index not in embeddings]
@@ -112,13 +127,20 @@ async def run_ingest(ctx: Context, ingest_id: UUID) -> dict[str, Any] | None:
         async with sem:
             return await sort_candidate(ctx.judge, c, cfg, use_hint=cfg.sort_use_hint)
 
+    # One embedding batch for every entity name in this ingest, used to find look-alike names ("Blore", "Bangalore").
+    name_vectors: dict[str, list[float]] = {}
+    if cfg.entities_enabled:
+        names = sorted({e.name for c in pending for e in c.entities if not is_generic(normalize(e.name))})
+        if names:
+            name_vectors = dict(zip(names, await ctx.embedder.embed(names)))
+
     t_embed = time.perf_counter()
     sorts = await asyncio.gather(*(sort_one(c) for c in pending))
     t_sort = time.perf_counter()
 
     # Reconcile and commit one at a time so each candidate sees the ones committed before it.
     for c, s in zip(pending, sorts):
-        await _process(ctx, ingest, c, embeddings[c.index], s, scope, chain, settings)
+        await _process(ctx, ingest, c, embeddings[c.index], s, scope, chain, settings, name_vectors)
 
     async with ctx.pool.connection() as conn:
         final = await repo.get_ingest(conn, ingest_id)
@@ -130,6 +152,11 @@ async def run_ingest(ctx: Context, ingest_id: UUID) -> dict[str, Any] | None:
             "extract_ms": int((t_extract - t0) * 1000), "embed_ms": int((t_embed - t_extract) * 1000),
             "sort_ms": int((t_sort - t_embed) * 1000), "reconcile_commit_ms": int((t_end - t_sort) * 1000),
             "total_ms": int((t_end - t0) * 1000),
+        }
+        receipt["usage"] = {
+            "extract_tokens_in": int(final.get("tokens_in") or 0),
+            "extract_tokens_out": int(final.get("tokens_out") or 0),
+            **usage.as_dict(),
         }
         await repo.finish_ingest(conn, ingest_id, receipt)
     return receipt

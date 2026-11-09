@@ -296,8 +296,8 @@ function Key({ group }: { group: Group }) {
           <div className="krow"><span className="kfact" /><span><b>Fact</b>. The colored bar is its category; struck through means replaced.</span></div>
           <div className="krow"><span className="echip">Name</span><span>Other entities the fact names</span></div>
           {group === "entity" && <div className="krow"><span className="ln" style={{ borderColor: "var(--entity)" }} /><span>Fact also names this entity</span></div>}
-          <div className="krow"><span className="ln dash" style={{ borderColor: "var(--indigo)" }} /><span>Related: both true, same subject. Shown for the selected fact only</span></div>
-          <div className="krow"><span className="ln" style={{ borderColor: "var(--purple)" }} /><span>Hides a broader fact at this scope</span></div>
+          <div className="krow"><span className="ln dash" style={{ borderColor: "var(--accent)" }} /><span>Related: Jev judged both true and about the same subject. Switch in the toolbar</span></div>
+          <div className="krow"><span className="ln" style={{ borderColor: "var(--accent-2)" }} /><span>Hides a broader fact at this scope</span></div>
           <div className="krow"><span className="ln" style={{ borderColor: "var(--muted)" }} /><span>Replaced by a newer fact (arrow points to the old one)</span></div>
         </>
       )}
@@ -409,6 +409,8 @@ function GraphCanvas({ data, focus, group }: { data: GraphData; focus?: string; 
   const [selected, setSelected] = useState<string | null>(focus ?? null);
   const flow = useReactFlow();
   const storageKey = `memx.layout2.${group}.${data.view}.${data.scope}`;
+  const [relMode, setRelModeState] = useState<RelMode>(loadRelMode);
+  const setRelMode = (m: RelMode) => { setRelModeState(m); try { localStorage.setItem("memx.graph.related", m); } catch { /* storage unavailable */ } };
   const [moved, setMoved] = useState<Record<string, XY>>(() => loadMoved(storageKey));
 
   const model = useMemo(() => buildModel(data, hidden, group), [data, hidden, group]);
@@ -508,24 +510,30 @@ function GraphCanvas({ data, focus, group }: { data: GraphData; focus?: string; 
         dim: !!neighbors && !neighbors.has(f.id), width: NODE_W,
         chips: chips.slice(0, CHIP_MAX), more: Math.max(0, chips.length - CHIP_MAX),
         scopeTag: f.scope !== data.scope ? f.scope : undefined,
-        badges: f.shadowed_here ? <span title="Hidden at this scope by a narrower correction" style={{ color: "var(--purple)" }}>shadowed here</span> : f.reinforced_count > 0 ? <span title="Said again this many times">×{f.reinforced_count + 1}</span> : undefined,
+        badges: f.shadowed_here ? <span title="Hidden at this scope by a narrower correction" style={{ color: "var(--accent-2)" }}>shadowed here</span> : f.reinforced_count > 0 ? <span title="Said again this many times">×{f.reinforced_count + 1}</span> : undefined,
       } satisfies FactNodeData,
     });
   }
 
   const boxOf = (id: string) => ({ ...pos.get(id)!, ...model.sizes.get(id)! });
   const edges: Edge[] = [];
-  // "Related" links are Jev's "both true, same subject" verdicts. Between company facts nearly everything is
-  // related to everything, so they are drawn only for the selected fact. Shadows and replacements stay visible.
-  const visibleEdges = data.edges.filter((e) => model.factById.has(e.source) && model.factById.has(e.target))
-    .filter((e) => e.kind !== "related" || e.source === selected || e.target === selected);
+  // "Related" links are Jev's "both true, same subject" verdicts. They are drawn for every fact by default (the
+  // toolbar switch can limit them to the selected fact, or hide them). Shadows and replacements always stay visible.
+  const allEdges = data.edges.filter((e) => model.factById.has(e.source) && model.factById.has(e.target));
+  const relatedCount = allEdges.filter((e) => e.kind === "related").length;
+  const visibleEdges = allEdges.filter((e) => e.kind !== "related" || relMode === "always"
+    || (relMode === "selected" && (e.source === selected || e.target === selected)));
   visibleEdges.forEach((e, i) => {
     const active = neighbors ? (e.source === selected || e.target === selected) : true;
-    const color = e.kind === "shadows" ? "var(--purple)" : e.kind === "supersedes" ? "var(--muted)" : "var(--indigo)";
+    const color = e.kind === "shadows" ? "var(--accent-2)" : e.kind === "supersedes" ? "var(--muted)" : "var(--accent)";
+    const related = e.kind === "related";
     edges.push({
       id: `e${i}`, source: e.source, target: e.target, type: "default", ...facing(boxOf(e.source), boxOf(e.target)),
-      label: active && selected ? (e.kind === "related" ? "related" : e.kind === "supersedes" ? "replaced" : "hides") : undefined,
-      style: { stroke: color, strokeWidth: active ? 1.8 : 1, strokeDasharray: e.kind === "related" ? "5 4" : undefined, opacity: active ? 0.9 : 0.08 },
+      label: active && selected && !related ? (e.kind === "supersedes" ? "replaced" : "hides") : undefined,
+      style: {
+        stroke: color, strokeWidth: active && selected ? 2 : 1.5, strokeDasharray: related ? "6 4" : undefined,
+        opacity: !active ? 0.1 : related && !selected ? 0.75 : 0.95,
+      },
       markerEnd: e.kind === "related" ? undefined : { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
     });
   });
@@ -563,7 +571,13 @@ function GraphCanvas({ data, focus, group }: { data: GraphData; focus?: string; 
             <span className="sw" style={{ background: catVar(c) }} />{CATEGORY_LABEL[c]}
           </button>
         ))}
-        <span className="small muted" style={{ marginLeft: "auto" }}>
+        <span style={{ marginLeft: "auto" }} />
+        {relatedCount > 0 && (
+          <Seg label="Related links" value={relMode} onChange={setRelMode} options={[
+            { value: "always", label: `Related links (${relatedCount})` }, { value: "selected", label: "On click" }, { value: "off", label: "Off" },
+          ]} />
+        )}
+        <span className="small muted">
           {model.facts.length} facts
           {group === "entity" ? ` · ${model.nodeEntities.length} linking entit${model.nodeEntities.length === 1 ? "y" : "ies"} · ${themeCount} theme${themeCount === 1 ? "" : "s"}` : ` · ${model.clusters.length} scope${model.clusters.length === 1 ? "" : "s"}`}
         </span>
@@ -609,6 +623,17 @@ function GraphCanvas({ data, focus, group }: { data: GraphData; focus?: string; 
       </div>
     </>
   );
+}
+
+type RelMode = "selected" | "always" | "off";
+
+function loadRelMode(): RelMode {
+  try {
+    const v = localStorage.getItem("memx.graph.related");
+    return v === "selected" || v === "off" ? v : "always";
+  } catch {
+    return "always";
+  }
 }
 
 function loadGroup(): Group {

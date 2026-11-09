@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, GitBranch, Network, Trash2, Workflow } from "lucide-react";
 import { api, type Decision, type Fact } from "../lib/api";
 import { useApp } from "../lib/app";
-import { CATEGORY_LABEL, ENTITY_TYPE_LABEL, VERDICT_LABEL, fmtDate, num, pct, short, topicLabel } from "../lib/meta";
+import { CATEGORY_LABEL, ENTITY_TYPE_LABEL, HELD_REASON, VERDICT_LABEL, fmtDate, num, pct, short, topicLabel } from "../lib/meta";
 import { CategoryChip, ConfirmButton, Drawer, ErrorBox, Loading, Pill, ProbBars, useToast } from "./ui";
 
 export function statusTone(status: Fact["status"]) {
@@ -24,8 +24,14 @@ function DecisionLine({ d, factId }: { d: Decision; factId: string }) {
     return (
       <div className="small">
         <b>Entity “{r.name}”</b> {r.action === "alias"
-          ? <>merged into “{r.with}” by Jev ({pct(r.p_same)} the same thing).</>
-          : <>kept separate from “{r.with}” (Jev {pct(r.p_same)} the same thing).</>}
+          ? <>merged into “{r.with}” by Jev ({pct(r.p_same)} the same thing{r.how ? `, paired by ${r.how}` : ""}).</>
+          : r.action === "link"
+          ? (r.kept_by_default
+            ? <>linked to the known “{r.with}”: same name, and Jev was unsure ({pct(r.p_same)} same) but not sure it is someone else, so it stays with the known one.</>
+            : <>confirmed as the known “{r.with}” by Jev ({pct(r.p_same)}).</>)
+          : r.variant
+          ? <>has the same name as a known “{r.with}”, but Jev judged it someone else ({pct(r.p_same)} same).</>
+          : <>kept separate from “{r.with}” (Jev {pct(r.p_same)} the same thing{r.how ? `, paired by ${r.how}` : ""}).</>}
       </div>
     );
   }
@@ -37,6 +43,11 @@ function DecisionLine({ d, factId }: { d: Decision; factId: string }) {
     return (
       <div className="small">
         <b>{VERDICT_LABEL[r.label as keyof typeof VERDICT_LABEL] ?? r.label}</b> {how}, similarity {num(d.similarity)}.
+        {r.acted && r.acted !== r.label && (
+          <div style={{ marginTop: 2 }}>
+            <Pill tone="warn">held back</Pill> acted on as <b>{VERDICT_LABEL[r.acted as keyof typeof VERDICT_LABEL] ?? r.acted}</b>: {HELD_REASON[r.reason] ?? "a rule held it back"}.
+          </div>
+        )}
         <div className="muted" style={{ marginTop: 2 }}>{mine ? "Compared with" : "Compared by new fact"}: “{other}”</div>
       </div>
     );

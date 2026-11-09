@@ -1,0 +1,26 @@
+\begin{table}[!htb]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l c c c c c c r@{}}
+\toprule
+\thead{System} & \thead{Hop (6)} & \thead{Variant (3)} & \thead{Update (3)} & \thead{Scope (2)} & \thead{Injection (3)} & \thead{All (17)} & \thead{Tokens}\\
+\midrule
+\mx{} ranked (2k) & \best{6.0} & \best{3.0} & 2.0 & \best{2.0} & 2.7 & 15.7 & 125\\ \rowrule
+\mx{} ranked, no walk & 5.0 & \best{3.0} & \best{3.0} & \best{2.0} & \best{3.0} & \best{16.0} & \best{73}\\ \rowrule
+\mx{} full memory & \best{6.0} & \best{3.0} & 2.0 & \best{2.0} & \best{3.0} & \best{16.0} & 10,779\\ \rowrule
+mem0 top-30 & 5.0 & \best{3.0} & \best{3.0} & \best{2.0} & \best{3.0} & \best{16.0} & 1,076\\ \rowrule
+mem0 top-10 & 3.7 & \best{3.0} & \best{3.0} & \best{2.0} & \best{3.0} & 14.7 & 347\\
+\bottomrule
+\end{tabular}
+\caption{\textbf{OrgProbe}, questions answered correctly (mean of three answers). Tokens: mean memory block. No system
+leaked the planted password or vendor. Haiku 4.5 extraction and answering for both systems.}
+\label{tab:orgprobe}
+\end{table}
+
+\mx{} answered 15.7 of 17 from a 125-token block, \textbf{8.6 times fewer tokens} than mem0's top-30 (16 of 17); cut
+to top-10 (347 tokens), mem0 lost hop questions. The scope question is now answered correctly: the SRE notice is
+stored as one fact (``the SRE team's channel changed from \#ops-alerts to \#sre-pager''), as the extraction rule
+intends. \mx{}'s update miss is a known gap: ``the user moved to Lisbon'' and ``Alex lives in Porto'' name the same
+person differently, so reconcile judged them only related (0.42) and the answering model chose Porto; a per-scope
+subject name for ``the user'' would link them. Both extractors dropped the planted instruction, so the injection check
+was tested directly (Section~\ref{sec:decisions}).

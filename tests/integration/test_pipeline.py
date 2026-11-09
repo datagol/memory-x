@@ -71,9 +71,53 @@ async def test_child_correction_shadows_ancestor_only_below(make_memory):
     assert (await mem.facts(SCOPE))[0].status == "active"  # ancestor row untouched
 
 
+def channel_verdict(candidate: str, neighbor: str) -> tuple[str, float]:
+    # Jev's real mistake on the org probe: the "previous channel" half of a notice judged as replacing the new channel.
+    if "#ops-alerts" in neighbor and "#sre-pager" in candidate:
+        return "candidate_replaces", 0.94
+    if "#sre-pager" in neighbor and "previous" in candidate:
+        return "candidate_replaces", 0.95
+    return "unrelated", 0.9
+
+
+async def test_a_split_change_notice_keeps_its_correction(make_memory):
+    mem = await make_memory(judge=FakeJudge(verdict=channel_verdict))
+    await mem.insert("memory.acme", say("Production alerts go to #ops-alerts."))
+    receipt = await mem.insert("memory.acme.sre", say(
+        "Production alerts for the SRE team now go to #sre-pager. The previous channel was #ops-alerts."))
+    assert receipt.shadowed == 1 and receipt.superseded == 0
+    sre = await mem.render("memory.acme.sre")
+    assert "now go to #sre-pager" in sre and "Production alerts go to #ops-alerts" not in sre
+    assert "Production alerts go to #ops-alerts" in await mem.render("memory.acme")
+
+
+async def test_facts_about_different_attributes_are_linked_not_replaced(make_memory):
+    mem = await make_memory(
+        judge=FakeJudge(verdict=lambda c, n: ("candidate_replaces", 0.97) if "page" in c else ("unrelated", 0.9)),
+        extractor=SentenceExtractor(attributes={"440 pages": "page count", "page 250": "reading progress"}))
+    await mem.insert(SCOPE, say("The Nightingale has 440 pages."))
+    receipt = await mem.insert(SCOPE, say("The user is on page 250 of The Nightingale."), idempotency_key="k2")
+    assert receipt.superseded == 0
+    memory = await mem.render(SCOPE)
+    assert "440 pages" in memory and "page 250" in memory
+    async with mem.ctx.pool.connection() as conn:
+        cur = await conn.execute("SELECT result FROM memx_decision WHERE step = 'verdict'")
+        [row] = await cur.fetchall()
+    assert row["result"]["reason"] == "different_attribute" and row["result"]["acted"] == "related"
+
+
+async def test_receipt_reports_usage(make_memory):
+    mem = await make_memory()
+    receipt = await mem.insert(SCOPE, say("The user prefers tea."))
+    async with mem.ctx.pool.connection() as conn:
+        cur = await conn.execute("SELECT receipt FROM memx_ingest WHERE id = %s", (receipt.ingest_id,))
+        usage = (await cur.fetchone())["receipt"]["usage"]
+    assert usage["extract_tokens_out"] >= 1 and usage["extract_splits"] == 0 and "jev_cost_usd" in usage
+
+
 def chicken_verdict(candidate: str, neighbor: str) -> tuple[str, float]:
     if "not like chicken" in candidate and "likes chicken" in neighbor:
-        return "candidate_replaces", 0.85
+        return "candidate_replaces", 0.93
     return "unrelated", 0.9
 
 
@@ -171,12 +215,22 @@ async def test_recall_full_then_ranked(make_memory):
     assert accessed.access_count >= 1
 
 
-async def test_upcoming_events_expire_past_events_persist(make_memory):
+async def test_events_persist_by_default(make_memory):
+    observed = datetime.now(UTC) - timedelta(days=60)
+    due = (observed + timedelta(days=5)).date().isoformat()  # upcoming when said, long over now
+    mem = await make_memory(extractor=SentenceExtractor(hints={"draft": "event"}, event_dates={"draft": due}))
+    await mem.insert(SCOPE, say("The user's draft will reach 4,700 words."), observed_at=observed)
+    assert f"({due}) The user's draft will reach 4,700 words." in await mem.render(SCOPE)
+    assert (await mem.sweep()).expired == 0
+
+
+async def test_upcoming_events_expire_when_configured(make_memory):
     observed = datetime.now(UTC) - timedelta(days=60)
     pto = (observed + timedelta(days=5)).date().isoformat()        # upcoming when said, long over now
     talk = (observed - timedelta(days=3)).date().isoformat()       # already in the past when said
     mem = await make_memory(extractor=SentenceExtractor(hints={"PTO": "event", "conference": "event"},
-                                                        event_dates={"PTO": pto, "conference": talk}))
+                                                        event_dates={"PTO": pto, "conference": talk}),
+                            event_ttl_days=30)
     await mem.insert(SCOPE, say("The user is on PTO next week. The user attended a conference."), observed_at=observed)
     md = await mem.render(SCOPE)
     assert f"({talk}) The user attended a conference." in md and "PTO" not in md
@@ -245,3 +299,59 @@ async def test_export_okf(mem):
     await mem.insert(SCOPE, say("The user likes tea."))
     data, report = await mem.export_okf("memory")
     assert report.files == 2 and data[:2] == b"PK"
+
+
+async def test_ranked_recall_shows_replaced_versions_only_when_asked(make_memory):
+    mem = await make_memory(judge=FakeJudge(verdict=theme_verdict, grade=lambda q, f: 3 if "mode" in f else 0))
+    await mem.insert(SCOPE, say("The user prefers dark mode in dashboards."), observed_at=datetime(2026, 9, 1, tzinfo=UTC))
+    await mem.insert(SCOPE, say("The user prefers light mode in dashboards."), idempotency_key="k2",
+                     observed_at=datetime(2026, 10, 1, tzinfo=UTC))
+    asked = await mem.recall(SCOPE, "What mode did I prefer before?", force_mode="ranked")
+    assert "light mode" in asked.markdown and "earlier, later replaced: The user prefers dark mode" in asked.markdown
+    plain = await mem.recall(SCOPE, "Which mode do I like for dashboards?", force_mode="ranked")
+    assert "light mode" in plain.markdown and "dark mode" not in plain.markdown
+
+
+async def test_queued_insert_extracts_through_a_provider_batch(make_memory):
+    import pytest
+
+    from memx.jobs.queue import Deferred
+    from memx.pipeline.ingest_job import run_ingest
+    from memx.providers.extractor import ExtractResult
+
+    class BatchExtractor(SentenceExtractor):
+        supports_batch = True
+
+        def __init__(self):
+            super().__init__()
+            self.submitted: dict = {}
+            self.ready = False
+
+        def request_body(self, window, *, observed_at, total_windows, already=None, model=True):
+            return {"window": window}
+
+        async def submit_batch(self, bodies):
+            self.submitted = bodies
+            return "batch_1"
+
+        async def poll_batch(self, batch_id):
+            if not self.ready:
+                return None
+            out = {}
+            for cid, body in self.submitted.items():
+                res = await SentenceExtractor.extract(self, body["window"], observed_at=None, total_windows=1)
+                out[cid] = ExtractResult(facts=res.facts, tokens_in=5, tokens_out=7)
+            return out
+
+    ex = BatchExtractor()
+    mem = await make_memory(extractor=ex, extract_batch=True)
+    receipt = await mem.insert(SCOPE, say("The user likes oolong tea."), mode="queued")
+    with pytest.raises(Deferred):
+        await run_ingest(mem.ctx, receipt.ingest_id)  # submitted
+    assert list(ex.submitted) == ["w0"]
+    with pytest.raises(Deferred):
+        await run_ingest(mem.ctx, receipt.ingest_id)  # still running
+    ex.ready = True
+    done = await run_ingest(mem.ctx, receipt.ingest_id)
+    assert done["added"] == 1 and done["usage"]["extract_batched_windows"] == 1
+    assert [f.text for f in await mem.facts(SCOPE)] == ["The user likes oolong tea."]

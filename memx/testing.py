@@ -24,14 +24,16 @@ _NAME_STOP = frozenset("The A An I It They We You He She My Our Their This That 
 _ORG_WORDS = ("inc", "ltd", "works", "corp", "bio", "labs", "group")
 
 
-def guess_entities(sentence: str, overrides: dict[str, tuple[str, str]] | None = None) -> list[dict[str, str]]:
-    """Deterministic stand-in for the extractor's entity list: capitalized runs that are not sentence starts."""
-    out: list[dict[str, str]] = []
+def guess_entities(sentence: str, overrides: dict[str, tuple] | None = None) -> list[dict[str, Any]]:
+    """Deterministic stand-in for the extractor's entity list: capitalized runs that are not sentence starts.
+    ``overrides`` maps a phrase to (name, type) or (name, type, [alternative names])."""
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for key, (name, etype) in (overrides or {}).items():
+    for key, spec in (overrides or {}).items():
+        name, etype, aka = spec[0], spec[1], list(spec[2]) if len(spec) > 2 else []
         if key.lower() in sentence.lower() and name.lower() not in seen:
             seen.add(name.lower())
-            out.append({"name": name, "type": etype})
+            out.append({"name": name, "type": etype, "aka": aka})
     for m in _NAME.finditer(sentence):
         name = m.group(0).strip()
         words = name.split()
@@ -49,7 +51,7 @@ def guess_entities(sentence: str, overrides: dict[str, tuple[str, str]] | None =
         lowered = name.lower()
         etype = ("team" if "team" in lowered else "organization" if any(w in lowered for w in _ORG_WORDS)
                  else "system" if any(ch.isdigit() for ch in name) or "-" in name else "person" if len(words) == 2 else "other")
-        out.append({"name": name, "type": etype})
+        out.append({"name": name, "type": etype, "aka": []})
     return out[:6]
 
 
@@ -87,8 +89,9 @@ class SentenceExtractor:
     model = "sentence-test"
 
     def __init__(self, hints: dict[str, str] | None = None, event_dates: dict[str, str] | None = None,
-                 entities: dict[str, tuple[str, str]] | None = None):
+                 entities: dict[str, tuple[str, str]] | None = None, attributes: dict[str, str] | None = None):
         self.hints = hints or {}
+        self.attributes = attributes or {}
         self.event_dates = event_dates or {}
         self.entities = entities or {}
         self.windows_seen: list[Window] = []
@@ -103,7 +106,9 @@ class SentenceExtractor:
                     continue
                 hint = next((c for key, c in self.hints.items() if key.lower() in sentence.lower()), None)
                 date = next((d for key, d in self.event_dates.items() if key.lower() in sentence.lower()), None)
+                attribute = next((a for key, a in self.attributes.items() if key.lower() in sentence.lower()), None)
                 facts.append({
+                    "attribute": attribute,
                     "text": sentence, "speaker": unit.role, "category_hint": hint, "is_event": bool(date),
                     "time_text": None, "event_date": date, "confidence": 1.0,
                     "entities": guess_entities(sentence, self.entities),
@@ -111,10 +116,13 @@ class SentenceExtractor:
         return ExtractResult(facts=facts[:25], tokens_in=len(window.units), tokens_out=len(facts))
 
 
+CHITCHAT = {"thanks", "thank you", "ok", "okay", "great", "hi", "hello", "sure", "you're welcome", "bye"}
+HISTORY_WORDS = ("previous", "earlier", "before", "used to", "originally", "first", "changed")
+
 VerdictFn = Callable[[str, str], tuple[str, float]]
 GradeFn = Callable[[str, str], float]
 TopicFn = Callable[[str], tuple[str, float]]
-MergeFn = Callable[[str, str], float]
+MergeFn = Callable[..., float]
 
 
 def overlap_grade(query: str, fact: str) -> float:
@@ -157,8 +165,10 @@ def demo_topic(text: str) -> tuple[str, float]:
 
 
 def subset_merge(a: str, b: str) -> float:
-    """Default merge rule: a name that is a word-subset of the other reads as the same thing."""
+    """Default merge rule: the same name, or a name that is a word-subset of the other, reads as the same thing."""
     from memx.pipeline.entities import normalize
+    if normalize(a) == normalize(b):
+        return 0.9
     return 0.85 if tokens_subset(normalize(a), normalize(b)) else 0.1
 
 
@@ -170,11 +180,16 @@ class FakeJudge:
 
     def __init__(self, verdict: VerdictFn | None = None, grade: GradeFn | None = None,
                  injection_markers: tuple[str, ...] = ("ignore previous", "ignore all", "system prompt"),
-                 topic: TopicFn | None = None, merge: MergeFn | None = None):
+                 topic: TopicFn | None = None, merge: MergeFn | None = None,
+                 coexist: Callable[[str, str], float] | None = None,
+                 same_attribute: Callable[[str, str], float] | None = None):
         self.verdict = verdict or (lambda candidate, neighbor: ("related", 0.9))
         self.grade = grade or overlap_grade
         self.topic = topic or demo_topic
         self.merge = merge or subset_merge
+        self.coexist = coexist or (lambda candidate, neighbor: 0.9)
+        # (candidate label, neighbor label) -> P(same attribute); by default differently worded labels differ
+        self.same_attribute = same_attribute or (lambda a, b: 0.1)
         self.injection_markers = injection_markers
         self.requests: list[tuple[dict[str, Any], dict[str, Question]]] = []
 
@@ -195,7 +210,9 @@ class FakeJudge:
             elif isinstance(q, Choice) and set(q.criteria) == set(MERGE_OPTIONS):
                 i = int(name[1:])
                 pair = untrusted["pairs"][i]
-                p = self.merge(pair["a"], pair["b"])
+                # A merge rule may take (a, b) or (a, b, pair) to look at the facts as well as the names.
+                p = self.merge(pair["a"], pair["b"]) if self.merge.__code__.co_argcount == 2 else self.merge(
+                    pair["a"], pair["b"], pair)
                 choice = "same" if p >= 0.5 else "different"
                 answers[name] = {"type": "choice", "choice": choice, "confidence": max(p, 1 - p),
                                  "probabilities": {"same": p, "different": 1 - p - 0.05, "cannot_tell": 0.05}}
@@ -204,6 +221,20 @@ class FakeJudge:
                 label, p = self.verdict(untrusted["candidate"], untrusted["neighbors"][i])
                 answers[name] = {"type": "choice", "choice": label, "confidence": p,
                                  "probabilities": {k: (p if k == label else (1 - p) / 4) for k in q.criteria}}
+            elif isinstance(q, YesNo) and "worth remembering" in q.instructions:
+                i = int(name[1:])
+                turn = str(untrusted["turns"][i]).strip().lower().rstrip("!.")
+                answers[name] = {"type": "noul", "noul": 0.02 if turn in CHITCHAT else 0.95}
+            elif isinstance(q, YesNo) and "earlier" in q.instructions and "query" in q.instructions:
+                query = str(untrusted.get("query", "")).lower()
+                answers[name] = {"type": "noul", "noul": 0.95 if any(w in query for w in HISTORY_WORDS) else 0.03}
+            elif isinstance(q, YesNo) and "name the attribute each one gives" in q.instructions:
+                i = int(name[1:])
+                answers[name] = {"type": "noul", "noul": self.same_attribute(
+                    untrusted["candidate_attribute"], untrusted["neighbor_attributes"][i])}
+            elif isinstance(q, YesNo) and "both be true" in q.instructions:
+                i = int(name[1:])
+                answers[name] = {"type": "noul", "noul": self.coexist(untrusted["candidate"], untrusted["neighbors"][i])}
             elif isinstance(q, YesNo):
                 text = str(untrusted.get("candidate", "")).lower()
                 answers[name] = {"type": "noul", "noul": 0.95 if any(m in text for m in self.injection_markers) else 0.02}

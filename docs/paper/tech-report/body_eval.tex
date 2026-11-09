@@ -1,0 +1,63 @@
+% ================================================================= 10
+\section{Evaluation setup}\label{sec:eval}
+
+\paragraph{Benchmarks} \textbf{LongMemEval-S}~\cite{longmemeval}: 82 questions (12 per question type plus 10
+abstentions, fixed seed), each over a chat history of about 48 sessions and 115k tokens. \textbf{BEAM}~\cite{beam}: its 20
+shortest 100K conversations, with the two abilities a write-time policy serves, \emph{contradiction resolution} and
+\emph{knowledge update}, two questions each per conversation (80 in all), scored by BEAM's rubric judge.
+\textbf{OrgProbe}: 17 questions of our own over a fictional company's scope tree (Section~\ref{sec:orgprobe}).
+
+\paragraph{Systems} \textbf{\mx{}} in \textbf{ranked} recall (4,000-token budget) and \textbf{full} memory (everything
+visible). \textbf{mem0} open source (\code{mem0ai} 2.2.1, default prompts, \code{top\_k}=30). \textbf{Zep}: Graphiti
+0.31.2 on FalkorDB with its combined hybrid search, with its default LLM judge or with Graphiti's own \code{JevClient}.
+Two baselines: \textbf{full context} (every session given to the answering model) and \textbf{chunk RAG} (chunks of
+800--1,000 tokens, most similar first, same 4,000-token budget).
+
+\paragraph{Held equal} Within each comparison every system used the same extraction model, embeddings
+(\code{text-embedding-3-small}), answering model and prompt (temperature 0) and judge (Claude Sonnet 5.5 with the
+benchmark's own prompts). LongMemEval and the Zep comparison extracted with Claude Haiku 5.5 and answered with Haiku
+4.5; BEAM used Haiku 5.5 for both; OrgProbe used Haiku 4.5 for both. Every session was inserted at its
+own date. The other systems ran with documented defaults. LongMemEval comparisons are paired on question (exact
+McNemar); BEAM uses bootstrap intervals and a paired sign test.
+
+% ================================================================= 11a
+\section{Memory efficiency against mem0}\label{sec:efficiency}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_efficiency.pdf}
+\caption{\textbf{Memory tokens given to the answering model per question}, \mx{} ranked recall against mem0 top-30, with
+each system's score above its bar (log scale).}
+\label{fig:efficiency}
+\end{figure}
+
+On every benchmark \mx{} hands the answering model 2 to 9 times fewer memory tokens than mem0, at higher accuracy on
+LongMemEval, BEAM and the Zep set and within one question on OrgProbe (Figure~\ref{fig:efficiency}), for about the
+same ingest cost. Every token in that block is paid for on every question an agent asks; the sections below give the
+detail.
+
+\input{results_lme.tex}
+
+\input{results_beam.tex}
+
+\input{results_zep.tex}
+
+% ================================================================= 12
+\section{Organisational probe}\label{sec:orgprobe}
+
+LongMemEval has no scopes, few named colleagues and nothing that tries to steer the memory. OrgProbe
+(\code{eval/orgprobe}) covers those: a company handbook at \code{memory.acme}, a reseller note with a planted instruction
+aimed at AI systems, an SRE notice that changes the escalation channel for \code{memory.acme.sre} only, five
+conversations with an engineer over six weeks, and 16 filler sessions so that memory (about 300 facts) exceeds the
+budget. Seventeen questions test entity hops, name variants (``Priya'', ``K8s''), updates, scope-specific answers and the
+planted instruction; each is answered three times. mem0 maps each scope to a \code{user\_id} and searches every
+ancestor.
+
+\input{results_orgprobe.tex}
+
+\input{results_hop.tex}
+
+% ================================================================= 13
+\section{Decision quality}\label{sec:decisions}
+
+\input{results_decisions.tex}

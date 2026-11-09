@@ -126,8 +126,8 @@ function RetrievalPath({ ex, markdownTokens }: { ex: Explain; markdownTokens: nu
       nodes.push({ id: "kw", type: "stage", position: { x: X.src, y: h / 2 + 10 }, data: {
         kicker: <><TextIcon /> Keyword search</>, title: `${ex.candidates.filter((c) => c.fts_rank).length} by shared words`, body: `search ${ms(ex.timings.search_ms)} · graded ${ms(ex.timings.grade_ms)}`, width: 200,
       } });
-      edges.push({ id: "q-vec", source: "q", target: "vec", type: "smoothstep", style: { stroke: "var(--indigo)" }, markerEnd: arrow("var(--indigo)") });
-      edges.push({ id: "q-kw", source: "q", target: "kw", type: "smoothstep", style: { stroke: "var(--indigo)" }, markerEnd: arrow("var(--indigo)") });
+      edges.push({ id: "q-vec", source: "q", target: "vec", type: "smoothstep", style: { stroke: "var(--accent)" }, markerEnd: arrow("var(--accent)") });
+      edges.push({ id: "q-kw", source: "q", target: "kw", type: "smoothstep", style: { stroke: "var(--accent)" }, markerEnd: arrow("var(--accent)") });
       if (hasWalk && ex.walk) {
         const cut = ex.walk.hubs_cut.length ? `hub cut: ${ex.walk.hubs_cut.slice(0, 2).map((h) => h.name).join(", ")}${ex.walk.hubs_cut.length > 2 ? "…" : ""}` : "no hubs cut";
         nodes.push({ id: "walk", type: "stage", position: { x: X.walk, y: h / 2 + 150 }, data: {
@@ -141,7 +141,7 @@ function RetrievalPath({ ex, markdownTokens }: { ex: Explain; markdownTokens: nu
       nodes.push({ id: "all", type: "stage", position: { x: X.src, y: h / 2 - 60 }, data: {
         kicker: <><FileStack /> Whole memory</>, title: `${ex.chain_facts} facts · ${ex.chain_tokens} tokens`, body: ex.mode_reason, width: 210,
       } });
-      edges.push({ id: "q-all", source: "q", target: "all", type: "smoothstep", style: { stroke: "var(--indigo)" }, markerEnd: arrow("var(--indigo)") });
+      edges.push({ id: "q-all", source: "q", target: "all", type: "smoothstep", style: { stroke: "var(--accent)" }, markerEnd: arrow("var(--accent)") });
     }
     nodes.push({ id: "block", type: "stage", position: { x: X.block, y: h / 2 - 60 }, data: {
       kicker: <><Sparkles /> Memory block</>, title: `${picked.length} facts · ${markdownTokens} tokens`, body: `budget ${ex.budget_limit} tokens`, tone: "block", width: 210,
@@ -154,7 +154,7 @@ function RetrievalPath({ ex, markdownTokens }: { ex: Explain; markdownTokens: nu
         text: c.text, category: c.category, status: "active", dim: !isPicked, width: 280,
         badges: <span>{viaHop && <b style={{ color: "var(--entity)", marginRight: 6 }}>via {last?.kind === "topic" ? topicLabel(last.via) : last?.via}</b>}{ranked && c.relevance !== null && c.relevance !== undefined ? `relevance ${pct(c.relevance)}` : ""}{!isPicked && <b style={{ marginLeft: 6 }}>{STATUS_META[c.status].label}</b>}</span>,
       } });
-      const srcColor = isPicked ? "var(--indigo)" : "var(--line-strong)";
+      const srcColor = isPicked ? "var(--accent)" : "var(--line-strong)";
       if (ranked && viaHop) {
         edges.push({ id: `w-${c.id}`, source: "walk", target: c.id, type: "default", label: isPicked ? `${c.hops ?? c.path?.length} hop${(c.hops ?? 1) === 1 ? "" : "s"}` : undefined, style: { stroke: isPicked ? "var(--entity)" : "var(--line-strong)", opacity: isPicked ? 1 : 0.5 } });
         // The bridge: the search hit this fact was reached from.
@@ -166,7 +166,7 @@ function RetrievalPath({ ex, markdownTokens }: { ex: Explain; markdownTokens: nu
       } else {
         edges.push({ id: `a-${c.id}`, source: "all", target: c.id, type: "default", style: { stroke: srcColor, opacity: isPicked ? 1 : 0.5 } });
       }
-      if (isPicked) edges.push({ id: `b-${c.id}`, source: c.id, target: "block", type: "default", animated: true, label: num(c.score, 2), style: { stroke: "var(--purple)", strokeWidth: 1.6 }, markerEnd: arrow("var(--purple)") });
+      if (isPicked) edges.push({ id: `b-${c.id}`, source: c.id, target: "block", type: "default", animated: true, label: num(c.score, 2), style: { stroke: "var(--accent-2)", strokeWidth: 1.6 }, markerEnd: arrow("var(--accent-2)") });
     });
     return { nodes, edges, height: Math.min(860, Math.max(380, h + 60)) };
   }, [ex, markdownTokens]);

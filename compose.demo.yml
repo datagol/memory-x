@@ -1,0 +1,55 @@
+# Keyless demo: deterministic stand-ins replace Haiku, the embeddings and Jev, so nothing costs money and
+# results are only illustrative. Separate project and volume, so demo facts never mix with real ones.
+#
+#   docker compose -f compose.demo.yml up -d --build
+#   open http://localhost:8001          (MCP: http://localhost:8101/mcp)
+#
+# Remove it with: docker compose -f compose.demo.yml down -v
+
+name: memory-x-demo
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memx
+      POSTGRES_PASSWORD: memx
+      POSTGRES_DB: memx
+    volumes:
+      - memx-demo-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memx -d memx"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    command: ["uvicorn", "memx_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      MEMX_DSN: postgresql://memx:memx@postgres:5432/memx
+      MEMX_PROVIDERS: demo
+      MEMX_INSERT_MODE: background   # jobs run inside the API process; no worker needed
+      MEMX_API_TOKEN: ""
+    ports:
+      - "127.0.0.1:${MEMX_DEMO_PORT:-8001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mcp:
+    build: .
+    command: ["uvicorn", "memx_mcp.app:app", "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      MEMX_DSN: postgresql://memx:memx@postgres:5432/memx
+      MEMX_PROVIDERS: demo
+      MEMX_INSERT_MODE: background
+      MEMX_API_TOKEN: ""
+    ports:
+      - "127.0.0.1:${MEMX_DEMO_MCP_PORT:-8101}:8100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  memx-demo-pg:

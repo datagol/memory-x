@@ -36,6 +36,13 @@ export const VERDICT_LABEL: Record<VerdictRow["label"], string> = {
   unrelated: "Unrelated",
 };
 
+export const HELD_REASON: Record<string, string> = {
+  below_floor: "Jev wasn't sure enough to act on it, so both facts stay, linked as related",
+  different_attribute: "the two facts state different attributes, so both can be true",
+  same_window: "both came from the same part of this insert, so one statement isn't replacing itself",
+  past_statement: "the new fact only describes an earlier state, so it can't retire the current one",
+};
+
 export const OUTCOME_META: Record<NonNullable<TraceCandidate["outcome"]>, { label: string; tone: string; help: string }> = {
   added: { label: "Added", tone: "ok", help: "Stored as a new active fact." },
   dropped: { label: "Duplicate", tone: "muted", help: "Already known. The existing fact was reinforced instead." },

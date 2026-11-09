@@ -1,0 +1,14 @@
+Agent memory is a stream of small decisions: is a statement new, does it replace an older one, is ``Priya'' the Priya we
+know, is a fact worth the context window? \textbf{\mx} splits the work: a generative model writes candidate facts, and
+\textbf{Jev}, a calibrated decision model that returns a probability for every option, makes every decision, with
+thresholds in code and every answer logged. Its policies are scope-local corrections in a scope tree, a banded
+five-way reconcile verdict with a 0.9 floor and code guards on destructive outcomes, asymmetric entity priors, and joint
+grading of linked facts at recall.
+
+With extraction, embeddings, answering model and judge held equal, \mx{} gives the answering model 2--9 times fewer
+memory tokens than mem0 on every benchmark, for about the same ingest cost (\$0.14 against \$0.13 per history). On 82
+LongMemEval-S questions it scores 80.5\% from 358 tokens against mem0's 76.8\% from 1,650, and 89.0\% from full memory,
+significantly above mem0 ($p=0.013$); reading the whole 117k-token history scores 68\%. On 80 BEAM contradiction and
+update questions it scores 60.0\% against mem0's 53.8\% ($p=0.049$), and 66\% against 56\% on contradiction resolution.
+On 44 two-hop questions the entity walk lifts accuracy from 28 to 41 ($p=0.001$). Zep's Graphiti, with its LLM judge or
+with Jev, answered fewer of 10 comparison questions at four to five times \mx{}'s ingest cost.

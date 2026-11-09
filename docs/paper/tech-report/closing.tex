@@ -1,0 +1,24 @@
+% ================================================================= 14
+\section{Limitations}\label{sec:limits}
+\begin{itemize}
+\item \textbf{Sample size.} 82, 80, 44, 17 and 10 questions show large differences, not small ones; per-type results and
+the Zep comparison are descriptive.
+\item \textbf{Thresholds.} The 0.9 floor follows the calibration analysis on LongMemEval decisions, so BEAM is the
+held-out test. Thresholds are set, not fitted on human labels, and agreement with Sonnet is not ground truth. A
+labelling tool and a fitting script are published; the 300 human labels are not yet collected.
+\item \textbf{Models.} Memory systems extract with Haiku 5.5 throughout; OrgProbe used Haiku 4.5 for parity with its
+mem0 run. Numbers compare within a table, not across tables.
+\item \textbf{Ingest cost.} \mx{} stores more facts than mem0 and its ingest costs about the same (Section~\ref{sec:lme});
+the saving is at every recall. HopProbe and OrgProbe are author-written.
+\item \textbf{A hosted, closed decision model.} A Jev update can move the probability scale under fixed thresholds;
+\mx{} pins \code{jev-1.14} and stores the question version with every decision.
+\item \textbf{Conflict of interest.} \mx{} is the author's company's product. Harnesses, fixtures and result files are
+published.
+\end{itemize}
+
+\input{conclusion.tex}
+
+\section*{Availability}
+Code, harnesses (\code{eval/longmemeval}, \code{eval/beam}, \code{eval/orgprobe}, \code{eval/hopprobe},
+\code{eval/calibration}), result files and the figure script
+are in the \mx{} repository (\code{docs/paper/tech-report}).

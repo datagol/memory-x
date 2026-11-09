@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, BinaryIO
 from uuid import UUID
 
 from pydantic import TypeAdapter
 
+from memx import scope_settings
 from memx.config import InsertMode, MemxConfig
 from memx.context import Context
 from memx.db import repo
@@ -30,8 +31,21 @@ from memx.recall.engine import recall as _recall
 from memx.recall.render import render as _render
 from memx.scopes import ScopePath
 from memx.types import (
-    Candidate, Category, ExportReport, Fact, FactHistory, ForgetReport, HistoryEntry, IngestInput, InsertReceipt,
-    Messages, Recall, RecallMode, SweepReport, Text, Turn,
+    Candidate,
+    Category,
+    ExportReport,
+    Fact,
+    FactHistory,
+    ForgetReport,
+    HistoryEntry,
+    IngestInput,
+    InsertReceipt,
+    Messages,
+    Recall,
+    RecallMode,
+    SweepReport,
+    Text,
+    Turn,
 )
 
 _INPUT = TypeAdapter(IngestInput)
@@ -139,12 +153,12 @@ class Memory:
         when = observed_at or datetime.now(UTC)
         if when.tzinfo is None:
             when = when.replace(tzinfo=UTC)
-        if isinstance(inp, Text):
-            source, trust = inp.source, inp.trust if inp.trust is not None else cfg.default_text_trust
-        else:
-            source, trust = None, 1.0
-
         async with self.ctx.pool.connection() as conn:
+            if isinstance(inp, Text):
+                default_trust = (await scope_settings.resolve(conn, cfg, scope))["text_trust"]
+                source, trust = inp.source, inp.trust if inp.trust is not None else default_trust
+            else:
+                source, trust = None, 1.0
             async with conn.transaction():
                 await repo.ensure_scope(conn, scope)
                 ingest_id, created = await repo.create_ingest(
@@ -163,7 +177,7 @@ class Memory:
             return await self.receipt(ingest_id, with_facts=mode == "inline")
         if mode == "inline":
             try:
-                await run_ingest(self.ctx, ingest_id)
+                await run_ingest(self.ctx, ingest_id, allow_batch=False)
             except Exception as exc:
                 async with self.ctx.pool.connection() as conn:
                     await conn.execute(
@@ -193,7 +207,8 @@ class Memory:
                 facts = await repo.facts_by_ids(conn, [UUID(i) for i in counts["fact_ids"]])
         return InsertReceipt(
             ingest_id=ingest_id, status=row["status"], mode=row["mode"], error=row["error"], facts=facts,
-            **{k: counts.get(k, 0) for k in ("added", "dropped", "historical", "superseded", "shadowed", "rejected")},
+            **{k: counts.get(k, 0) for k in ("added", "dropped", "historical", "superseded", "shadowed", "rejected",
+                                             "held_back")},
         )
 
     async def wait(self, ingest_id: UUID, timeout: float = 30.0, *, with_facts: bool = True) -> InsertReceipt:
@@ -217,6 +232,58 @@ class Memory:
             self.ctx, scope, query, recent_turns=recent_turns, budget_tokens=budget_tokens,
             categories=categories, k=k, force_mode=force_mode, as_of=as_of, explain=explain,
         )
+
+    async def reapply_event_expiry(self, scope: str | None = None, *, dry_run: bool = False) -> dict[str, Any]:
+        """Recompute when upcoming events expire under the current settings (server default and scope overrides).
+
+        Facts stored under an earlier policy keep the expiry they were given; after the policy changes (event expiry
+        was on by default before 2026-11-03) this brings them in line. Expired facts that would not have expired come
+        back unless an identical active fact exists."""
+        cfg = self.ctx.config
+        now = datetime.now(UTC)
+        report: dict[str, Any] = {"checked": 0, "changed": 0, "revived": 0, "skipped_duplicate": 0}
+        async with self.ctx.pool.connection() as conn:
+            rows = await repo.event_facts(conn, str(ScopePath.parse(scope)) if scope else None)
+            ttl_by_scope: dict[str, Any] = {}
+            for row in rows:
+                report["checked"] += 1
+                if row["scope"] not in ttl_by_scope:
+                    ttl_by_scope[row["scope"]] = (await scope_settings.resolve(conn, cfg, row["scope"]))["event_ttl_days"]
+                ttl = ttl_by_scope[row["scope"]]
+                upcoming = row["event_at"].date() >= row["observed_at"].date()
+                new = row["event_at"] + timedelta(days=ttl) if ttl and upcoming else None
+                revive = row["status"] == "expired" and (new is None or new > now)
+                if new == row["stale_after"] and not revive:
+                    continue
+                report["changed"] += 1
+                if dry_run:
+                    report["revived"] += revive
+                    continue
+                async with conn.transaction():
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (row["scope"],))
+                    ok = await repo.set_event_expiry(conn, row["id"], new, revive)
+                if revive and ok:
+                    report["revived"] += 1
+                elif revive:
+                    report["skipped_duplicate"] += 1
+        return report
+
+    # ---- per-scope settings ---------------------------------------------
+
+    async def scope_settings(self, scope: str) -> dict[str, Any]:
+        """Effective settings at a scope: each value with the scope it comes from ("default" = MEMX_*)."""
+        async with self.ctx.pool.connection() as conn:
+            resolved = await scope_settings.resolve(conn, self.ctx.config, scope)
+        return resolved.as_dict(self.ctx.config)
+
+    async def set_scope_settings(self, scope: str, **changes: Any) -> dict[str, Any]:
+        """Override settings for a scope and everything below it. Pass ``None`` to inherit again.
+
+        Keys: budget_tokens, event_ttl_days, text_trust, walk_enabled.
+        """
+        async with self.ctx.pool.connection() as conn:
+            await scope_settings.update(conn, scope, changes)
+        return await self.scope_settings(scope)
 
     async def render(self, scope: str, *, include_ancestors: bool = True, show_scope: bool = False) -> str:
         path = ScopePath.parse(scope)
@@ -261,8 +328,18 @@ class Memory:
             report: list[dict[str, Any]] = []
             for t in tenants:
                 async with conn.transaction():
-                    report += [{"tenant": t, **row} for row in await reresolve(conn, self.ctx.judge, self.ctx.config, t)]
+                    report += [{"tenant": t, **row} for row in await reresolve(
+                        conn, self.ctx.judge, self.ctx.config, t, embed=self.ctx.embedder.embed)]
             return report
+
+    async def rereconcile(self, scope: str | None = None, *, dry_run: bool = False):
+        """Undo replacements and shadows that the current reconcile policy would not make, from the logged
+        verdicts (no Jev calls, no re-extraction). Covers every scope, or ``scope`` and everything under it."""
+        from memx.pipeline.rereconcile import rereconcile
+
+        path = str(ScopePath.parse(scope)) if scope else None
+        async with self.ctx.pool.connection() as conn:
+            return await rereconcile(conn, self.ctx.config, scope=path, dry_run=dry_run)
 
     async def entities(self, scope: str, *, view: str = "subtree", limit: int = 200) -> list[dict[str, Any]]:
         """Entities mentioned by facts at a scope and its children (or its chain), with fact counts."""
@@ -318,17 +395,22 @@ class Memory:
             if fact.scope == target:
                 return fact
             embedding = await repo.get_fact_embedding(conn, fact_id)
-            candidate = Candidate(text=fact.text, speaker=fact.speaker or "user", category_hint=fact.category)
+            cur = await conn.execute("SELECT attrs->>'attribute' AS attribute FROM memx_fact WHERE id = %s", (fact_id,))
+            attribute = (await cur.fetchone())["attribute"]
+            # Same guards as an insert: the attribute label counts; the window rule does not (window -1), since the
+            # copy is compared with facts at the broader scope, not with facts split from the same statement.
+            candidate = Candidate(text=fact.text, speaker=fact.speaker or "user", category_hint=fact.category,
+                                  attribute=attribute, window=-1)
             await repo.ensure_scope(conn, target)
             verdicts = await judge_neighbors(conn, self.ctx.judge, cfg, scope=target, chain=chain,
                                              candidate=candidate, category=fact.category, embedding=embedding,
                                              observed_at=fact.observed_at)
-            plan = plan_from(verdicts, cfg, target)
+            plan = plan_from(verdicts, cfg, target, candidate)
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (target,))
                 if plan.action == "drop":
                     new_id = plan.reinforce
-                    await repo.reinforce(conn, new_id)
+                    await repo.reinforce(conn, new_id, fact.observed_at)
                 else:
                     cur = await conn.execute(
                         """
@@ -339,7 +421,7 @@ class Memory:
                         SELECT %s::ltree, category, text, text_hash, token_count, embedding, embedding_model,
                                %s, %s, ingest_id, speaker, source, trust, extract_confidence, sort_confidence,
                                sort_probs, flags, observed_at, event_at, stale_after,
-                               attrs || jsonb_build_object('promoted_from', id::text)
+                               (attrs - 'window') || jsonb_build_object('promoted_from', id::text)
                           FROM memx_fact WHERE id = %s
                         RETURNING id
                         """,

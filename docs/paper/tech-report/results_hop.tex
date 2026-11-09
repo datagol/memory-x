@@ -1,0 +1,31 @@
+% ================================================================= 12b
+\section{Multi-hop recall: HopProbe}\label{sec:hop}
+
+LongMemEval and OrgProbe questions share words with the facts that answer them, so search finds those facts and the
+walk has nothing to add. HopProbe (\code{eval/hopprobe}) isolates the case the walk is for: 44 questions whose answer
+fact shares no content word with the question and is reachable only through a bridge fact. ``In which town is the
+person responsible for Orion based?'' needs ``Orion is owned by Ingrid Halvorsen'' and then ``Ingrid Halvorsen lives in
+Trondheim''; every answer fact has look-alikes about other people (``Kofi Mensah lives in Accra''), so search returns a
+pile of candidates it cannot tell apart. The directory sits among 16 filler chat sessions (228 facts in all); answers are
+scored exactly (the expected value and no look-alike value), with no judge.
+
+\begin{table}[!htb]
+\centering\small
+\begin{tabular}{@{}l c c c@{}}
+\toprule
+\thead{Ranked recall (2k)} & \thead{Correct / 44} & \thead{Answer fact in the block} & \thead{Memory tokens}\\
+\midrule
+walk on & \best{41} & 42 & 113\\ \rowrule
+walk off & 28 & 28 & 103\\
+\bottomrule
+\end{tabular}
+\caption{\textbf{HopProbe}, same stored memory, Haiku 4.5 answering. Paired: 14 questions only with the walk, 1 only
+without, exact McNemar $p=0.001$.}
+\label{tab:hop}
+\end{table}
+
+With the walk, 41 of 44 answers were right; without it, 28 (14 to 1, $p=0.001$), at about the same block size. Every miss
+without the walk is the same failure: the block holds the bridge (``Vega is owned by Mei Tanaka'') but not the answer,
+and the model says it does not know. The walk follows the shared entity, and joint grading keeps the reached fact
+because it is judged together with its bridge. On LongMemEval the walk changes nothing (80.5\% with and without), so its
+cost is one bounded graph query when it does not help.

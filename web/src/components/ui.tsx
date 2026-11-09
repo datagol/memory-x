@@ -226,7 +226,11 @@ export function MemoryMarkdown({ text }: { text: string }) {
   if (!text.trim()) return <Empty title="Nothing to show">The memory block is empty for this view.</Empty>;
   const lines = text.split("\n");
   const out: ReactNode[] = [];
-  let list: { text: string; children: string[] }[] = [];
+  type Item = { text: string; children: Item[] };
+  let list: Item[] = [];
+  const nested = (items: Item[]) => (
+    <ul>{items.map((c, j) => <li key={j}><Line text={c.text} />{c.children.length > 0 && nested(c.children)}</li>)}</ul>
+  );
   const flush = (key: string) => {
     if (!list.length) return;
     out.push(
@@ -234,7 +238,7 @@ export function MemoryMarkdown({ text }: { text: string }) {
         {list.map((item, i) => (
           <li key={i}>
             <Line text={item.text} />
-            {item.children.length > 0 && <ul>{item.children.map((c, j) => <li key={j}><Line text={c} /></li>)}</ul>}
+            {item.children.length > 0 && nested(item.children)}
           </li>
         ))}
       </ul>,
@@ -244,7 +248,8 @@ export function MemoryMarkdown({ text }: { text: string }) {
   lines.forEach((line, i) => {
     if (line.startsWith("# ")) { flush(`l${i}`); out.push(<h1 key={i}>{line.slice(2)}</h1>); }
     else if (line.startsWith("## ")) { flush(`l${i}`); out.push(<h2 key={i}>{line.slice(3)}</h2>); }
-    else if (line.startsWith("  - ")) { list[list.length - 1]?.children.push(line.slice(4)); }
+    else if (line.startsWith("    - ")) { list[list.length - 1]?.children.at(-1)?.children.push({ text: line.slice(6), children: [] }); }
+    else if (line.startsWith("  - ")) { list[list.length - 1]?.children.push({ text: line.slice(4), children: [] }); }
     else if (line.startsWith("- ")) { list.push({ text: line.slice(2), children: [] }); }
   });
   flush("end");

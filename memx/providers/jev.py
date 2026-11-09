@@ -7,10 +7,13 @@ as string values under ``untrusted``; it never appears in question instructions 
 
 from __future__ import annotations
 
+import asyncio
+
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from memx import usage as usage_tracker
 from memx.providers.http import OpenRouterHTTP, ProviderError
 
 UNTRUSTED_NOTE = (
@@ -52,6 +55,7 @@ class JudgeResult:
     answers: dict[str, dict[str, Any]]
     latency_ms: int
     model: str | None = None
+    cost_usd: float | None = None  # metered cost reported by the provider, when it reports one
 
 
 class Judge(Protocol):
@@ -81,7 +85,16 @@ class JevClient:
         if not questions:
             return JudgeResult(answers={}, latency_ms=0)
         if len(questions) > self.MAX_QUESTIONS:
-            raise ValueError(f"at most {self.MAX_QUESTIONS} questions per request")
+            # Jev takes at most 100 questions per request. The questions are independent, so split them into
+            # requests that share the same state and merge the answers.
+            items = list(questions.items())
+            parts = await asyncio.gather(*(
+                self.ask(state, dict(items[i:i + self.MAX_QUESTIONS]))
+                for i in range(0, len(items), self.MAX_QUESTIONS)))
+            costs = [p.cost_usd for p in parts if p.cost_usd is not None]
+            return JudgeResult(answers={k: v for p in parts for k, v in p.answers.items()},
+                               latency_ms=max(p.latency_ms for p in parts), model=parts[0].model,
+                               cost_usd=sum(costs) if costs else None)
         started = time.perf_counter()
         data = await self._http.post(
             "/systemone",
@@ -91,8 +104,12 @@ class JevClient:
         missing = [k for k in questions if k not in answers]
         if missing:
             raise ProviderError(f"Jev omitted answers for {missing[:5]}", retryable=True)
+        usage = data.get("usage") or {}
+        if (sink := usage_tracker.current()) is not None:
+            sink.add_jev(usage)
         return JudgeResult(
             answers=answers,
             latency_ms=int((time.perf_counter() - started) * 1000),
             model=data.get("model"),
+            cost_usd=float(usage["cost"]) if usage.get("cost") is not None else None,
         )

@@ -1,0 +1,106 @@
+
+\usepackage[letterpaper,top=0.9in,bottom=0.95in,left=1in,right=1in]{geometry}
+\usepackage{fontspec}
+\setmainfont{lmroman10}[Extension=.otf, UprightFont=*-regular, BoldFont=*-bold, ItalicFont=*-italic,
+  BoldItalicFont=*-bolditalic]
+\setmonofont{lmmono10}[Extension=.otf, UprightFont=*-regular, ItalicFont=*-italic, Scale=0.95]
+\setsansfont{Manrope}[
+  Path=fonts/, Extension=.ttf,
+  UprightFont=*-Medium, BoldFont=*-Bold, ItalicFont=*-Medium, BoldItalicFont=*-Bold]
+
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{colortbl}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+\usepackage{fancyhdr}
+\usepackage{xurl}
+\usepackage[colorlinks=true,linkcolor=linkblue,citecolor=linkblue,urlcolor=linkblue,
+  pdftitle={Memory-X: Calibrated Decisions for Scoped, Auditable Agent Memory},pdfauthor={Jyotish Bora},
+  pdfsubject={A generative writer and a calibrated judge for long-term agent memory}]{hyperref}
+
+% ---------------------------------------------------------------- colours
+\definecolor{linkblue}{HTML}{3B5BDB}
+\definecolor{ink}{HTML}{1F2328}
+\definecolor{muted}{HTML}{6B7280}
+\definecolor{rule}{HTML}{D5D8DC}
+\definecolor{titlebg}{HTML}{F1F2F4}
+\definecolor{accent}{HTML}{C2410C}
+\definecolor{okc}{HTML}{D1FADF}
+\definecolor{gracec}{HTML}{FEF3C7}
+\definecolor{wrongc}{HTML}{FEE2E2}
+\definecolor{crashc}{HTML}{FCA5A5}
+\definecolor{hangc}{HTML}{E9D5FF}
+\definecolor{nac}{HTML}{EEF0F2}
+\definecolor{boxblue}{HTML}{EAF2FF}
+\definecolor{boxteal}{HTML}{E6FAF7}
+
+% ---------------------------------------------------------------- headings, captions, page style
+\titleformat{\section}{\sffamily\fontsize{15}{18}\selectfont\color{ink}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\sffamily\fontsize{11.5}{14}\selectfont\color{ink}}{\thesubsection}{0.8em}{}
+\titleformat{\paragraph}[runin]{\normalfont\bfseries}{}{0pt}{}[.]
+\titlespacing*{\section}{0pt}{16pt}{8pt}
+\titlespacing*{\subsection}{0pt}{12pt}{5pt}
+\titlespacing*{\paragraph}{0pt}{5pt}{0.6em}
+
+\captionsetup{font=small,labelfont={sf,bf},labelsep=space,justification=justified,singlelinecheck=false,skip=6pt}
+\captionsetup[table]{position=below}
+\DeclareCaptionLabelFormat{bfsf}{\textsf{#1 #2}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\fancyfoot[C]{\small\thepage}
+
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{2.5em}
+\tolerance=2000
+\setlength{\parskip}{5pt}
+\linespread{1.04}
+\setlist{itemsep=2pt,topsep=3pt,leftmargin=1.4em}
+
+% ---------------------------------------------------------------- tables
+\newcommand{\thead}[1]{{\sffamily\small #1}}
+\newcommand{\rowrule}{\arrayrulecolor{rule}\specialrule{0.3pt}{1.5pt}{1.5pt}\arrayrulecolor{ink}}
+\setlength{\aboverulesep}{2pt}
+\setlength{\belowrulesep}{2pt}
+\renewcommand{\arraystretch}{1.12}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\tnote}[1]{{\par\footnotesize\raggedright #1\par}}
+
+% reliability cells
+\newcommand{\Rc}{\cellcolor{okc}R}
+\newcommand{\Ra}{\cellcolor{okc}R$^{\dagger}$}
+\newcommand{\Rs}{\cellcolor{okc}R$^{*}$}
+\newcommand{\Gc}{\cellcolor{gracec}G}
+\newcommand{\Gk}{\cellcolor{okc}G\,\checkmark}
+\newcommand{\Wc}{\cellcolor{wrongc}W}
+\newcommand{\Ws}{\cellcolor{wrongc}W$^{*}$}
+\newcommand{\Cc}{\cellcolor{crashc}C}
+\newcommand{\Hc}{\cellcolor{hangc}H}
+\newcommand{\NA}{\cellcolor{nac}{\color{muted}n/a}}
+\newcommand{\NE}{\cellcolor{nac}{\color{muted}--}}
+\providecommand{\checkmark}{\ensuremath{\surd}}
+
+% code
+\lstset{basicstyle=\ttfamily\footnotesize,columns=fullflexible,keepspaces=true,frame=none,
+  backgroundcolor=\color{titlebg},xleftmargin=6pt,xrightmargin=6pt,aboveskip=6pt,belowskip=4pt,
+  keywordstyle=\color{linkblue},commentstyle=\color{muted},stringstyle=\color{accent},
+  language=Python,showstringspaces=false}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\mx}{Memory-X}
+
+
