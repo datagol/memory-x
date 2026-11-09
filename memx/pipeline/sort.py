@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,14 @@ class SortResult:
     topic_probabilities: dict[str, float] = field(default_factory=dict)
 
 
+# The slim extraction schema has no time_text, so a time reference in a non-event fact ("vegetarian since 2019",
+# "joined in March") is read from the text.
+_TIME_WORDS = re.compile(
+    r"\b(1[89]\d\d|20\d\d|\d{4}-\d{2}-\d{2}|since|ago|yesterday|tomorrow|today|tonight|(next|last|this) "
+    r"(week|month|year|quarter|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|january|february|march|"
+    r"april|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)\b", re.IGNORECASE)
+
 def speaker_role(speaker: str) -> str:
     if speaker in ("user", "assistant", "document"):
         return speaker
@@ -58,7 +67,7 @@ def sort_state(candidate: Candidate, *, use_hint: bool = True) -> dict[str, Any]
         {
             "extractor_hint": candidate.category_hint.value if (use_hint and candidate.category_hint) else None,
             "speaker_role": speaker_role(candidate.speaker),
-            "has_time_reference": bool(candidate.time_text or candidate.event_date),
+            "has_time_reference": bool(candidate.time_text or candidate.event_date or _TIME_WORDS.search(candidate.text)),
         },
         {"candidate": clip(candidate.text, 600)},
     )

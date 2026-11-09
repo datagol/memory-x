@@ -1,12 +1,40 @@
+# memory-x: Postgres + API/dashboard + background worker + MCP server.
+#
+#   docker compose up            # dashboard and API on http://localhost:8000, MCP on http://localhost:8100/mcp
+#
+# Put OPENROUTER_API_KEY in .env (copy .env.example) before or after the first start; without it everything
+# starts and says what to set. After editing .env, run `docker compose up -d` again.
+#
+# Migrations run automatically when the API or worker starts. Data lives in the memx-pg volume;
+# `docker compose down` keeps it, `docker compose down -v` deletes it.
+
+name: memory-x
+
+x-memx: &memx
+  build: .
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-memx-env: &memx-env
+  MEMX_DSN: postgresql://memx:${POSTGRES_PASSWORD:-memx}@postgres:5432/memx
+  # Without a key the API still starts and every page says what to set; the worker waits for it.
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: memx
-      POSTGRES_PASSWORD: memx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memx}
       POSTGRES_DB: memx
     ports:
-      - "5433:5432"
+      - "127.0.0.1:${MEMX_PG_PORT:-5433}:5432"   # for the memx CLI and psql on this machine
     volumes:
       - memx-pg:/var/lib/postgresql/data
     healthcheck:
@@ -16,29 +44,42 @@ services:
       retries: 30
 
   api:
-    build: .
-    profiles: ["app"]
+    <<: *memx
     command: ["uvicorn", "memx_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      MEMX_DSN: postgresql://memx:memx@postgres:5432/memx
-      MEMX_INSERT_MODE: queued
-    env_file: .env
+      <<: *memx-env
+      MEMX_INSERT_MODE: ${MEMX_INSERT_MODE:-queued}
     ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - "${MEMX_PUBLISH:-127.0.0.1:8000}:8000"   # host[:port] for the dashboard; see .env.example
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
 
   worker:
-    build: .
-    profiles: ["app"]
+    <<: *memx
     command: ["memx", "worker"]
     environment:
-      MEMX_DSN: postgresql://memx:memx@postgres:5432/memx
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
+      <<: *memx-env
+
+  # MCP server (streamable HTTP) for Claude Code, Claude Desktop and other MCP clients. Same database and token as
+  # the API; inserts are queued for the worker.
+  mcp:
+    <<: *memx
+    command: ["uvicorn", "memx_mcp.app:app", "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      <<: *memx-env
+      MEMX_INSERT_MODE: queued
+    ports:
+      - "${MEMX_MCP_PUBLISH:-127.0.0.1:8100}:8100"   # host[:port] for MCP clients; see .env.example
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
 
 volumes:
   memx-pg:

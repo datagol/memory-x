@@ -1,3 +1,4 @@
+import { Logo } from "./components/Logo";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -25,27 +26,6 @@ const NAV: { page: Route["page"]; label: string; icon: JSX.Element }[] = [
   { page: "activity", label: "Activity", icon: <Activity /> },
   { page: "settings", label: "Settings", icon: <Settings /> },
 ];
-
-const Logo = () => (
-  <svg viewBox="0 0 84 84" fill="none" aria-hidden="true">
-    <rect width="84" height="84" rx="20" fill="url(#dg)" />
-    <circle cx="19" cy="17" r="5.5" stroke="white" />
-    <circle cx="63" cy="20" r="5.5" stroke="white" />
-    <circle cx="23" cy="62" r="5.5" stroke="white" />
-    <circle cx="62" cy="63" r="8.5" stroke="white" />
-    <circle cx="38" cy="35" r="8.5" stroke="white" strokeWidth="5" />
-    <line x1="30.67" y1="27.38" x2="22.67" y2="20.38" stroke="white" />
-    <line x1="45.7" y1="28.6" x2="57.7" y2="19.6" stroke="white" />
-    <line x1="45.39" y1="42.69" x2="56.39" y2="56.69" stroke="white" />
-    <line x1="26.52" y1="57.85" x2="31.52" y2="41.85" stroke="white" />
-    <defs>
-      <linearGradient id="dg" x1="75.5" y1="5.5" x2="3" y2="80" gradientUnits="userSpaceOnUse">
-        <stop stopColor="#2527D1" />
-        <stop offset="1" stopColor="#6F06CC" />
-      </linearGradient>
-    </defs>
-  </svg>
-);
 
 function TokenGate() {
   const [value, setValue] = useState(getToken());
@@ -91,10 +71,7 @@ export default function App() {
   return (
     <div className="shell">
       <aside className="rail">
-        <div className="brand">
-          <Logo />
-          <div><b>memx</b><span>DataGOL memory console</span></div>
-        </div>
+        <Logo tagline="Agent memory console" />
         <nav className="nav" aria-label="Main">
           <div className="nav-label">Workspace</div>
           {NAV.map((n) => (

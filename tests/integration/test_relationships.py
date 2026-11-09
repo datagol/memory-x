@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from memx import Text
-from memx.pipeline.entities import normalize, tokens_subset
-from memx.testing import FakeJudge, SentenceExtractor, demo_grade, guess_entities
+from memx.pipeline.entities import is_description, normalize, tokens_subset
+from memx.testing import FakeJudge, HashEmbedder, SentenceExtractor, demo_grade, guess_entities
 
 ORG = "memory.halvorsen"
 # Ranked mode normally runs over hundreds of facts with search returning 40 of them. On a 12-fact test memory
@@ -35,6 +35,8 @@ def test_normalize_and_subset():
     assert tokens_subset("marcus", "marcus oyelaran")
     assert not tokens_subset("marcus oyelaran", "marcus oyelaran")
     assert not tokens_subset("ab", "ab team")
+    assert is_description("the bakery down the street") and not is_description("the data platform team")
+    assert not is_description("Priya Lindqvist") and not is_description("Northwind Analytics")
 
 
 def test_guess_entities_skips_sentence_starts_and_the_user():
@@ -167,7 +169,8 @@ async def test_reresolve_merges_short_names_into_the_full_entity(make_memory):
     assert {"Priya", "Priya Lindqvist"} <= {e["name"] for e in await mem.entities(ORG)}
     mem.ctx.judge.merge = lambda a, b: 0.9  # type: ignore[attr-defined]
     report = await mem.reresolve_entities()
-    assert report == [{"tenant": "halvorsen", "short": "Priya", "into": "Priya Lindqvist", "p_same": 0.9, "merged": True}]
+    assert report == [{"tenant": "halvorsen", "short": "Priya", "into": "Priya Lindqvist", "how": "shares a word",
+                       "p_same": 0.9, "merged": True}]
     ents = {e["name"]: e for e in await mem.entities(ORG)}
     assert "Priya" not in ents and ents["Priya Lindqvist"]["active"] == 2 and "priya" in ents["Priya Lindqvist"]["aliases"]
 
@@ -279,3 +282,145 @@ async def test_tenants_never_share_entities(make_memory):
     assert not any(t == "company_b" and n == "Priya Lindqvist" for t, n in rows)
     judge: FakeJudge = mem.ctx.judge  # type: ignore[assignment]
     assert not any("pairs" in s.get("untrusted", {}) for s, _ in judge.requests), "no merge question across tenants"
+
+
+
+# ---- better name matching -------------------------------------------------------------------------------------
+
+
+class SynonymEmbedder(HashEmbedder):
+    """Hash embeddings, but listed names embed like their synonym, so "K8s" lands next to "Kubernetes"."""
+
+    def __init__(self, synonyms: dict[str, str]):
+        super().__init__()
+        self.synonyms = {k.lower(): v for k, v in synonyms.items()}
+
+    def vector(self, text: str) -> list[float]:
+        return super().vector(self.synonyms.get(text.lower(), text))
+
+
+def merges_only(*pairs: tuple[str, str]):
+    wanted = {frozenset((a.lower(), b.lower())) for a, b in pairs}
+    return lambda a, b: 0.9 if frozenset((a.lower(), b.lower())) in wanted else 0.1
+
+
+async def entity_rows(mem):
+    async with mem.ctx.pool.connection() as conn:
+        cur = await conn.execute("SELECT name, norm, aliases, known_as FROM memx_entity ORDER BY norm")
+        return await cur.fetchall()
+
+
+async def merge_requests(judge: FakeJudge):
+    return [(s, q) for s, q in judge.requests if "pairs" in s.get("untrusted", {})]
+
+
+async def test_alternative_name_from_the_extractor_links_spellings_with_no_shared_word(make_memory):
+    extractor = SentenceExtractor(entities={"blore": ("Blore", "place", ["Bangalore", "Bengaluru"]),
+                                            "bangalore": ("Bangalore", "place")})
+    judge = FakeJudge(merge=merges_only(("Bangalore", "Blore")))
+    mem = await make_memory(extractor=extractor, judge=judge)
+    await mem.insert(ORG, Text(text="Abhinandan is based in Blore."), idempotency_key="a")
+    receipt = await mem.insert(ORG, Text(text="Mahesh moved to Bangalore last year."), idempotency_key="b")
+    [fact] = receipt.facts
+    fact = await mem.get_fact(fact.id)
+    [place] = [e for e in fact.entities if e.type == "place"]
+    assert place.name == "Bangalore"  # the longer spelling became the display name
+    rows = {r["name"]: r for r in await entity_rows(mem)}
+    assert "Blore" not in rows and "blore" in rows["Bangalore"]["aliases"]
+    [(state, questions)] = await merge_requests(judge)
+    assert state["judge_context"]["pairs"][0]["how_found"] == "suggested alternative name"
+    assert "Names that look alike can be different things" in questions["m0"].instructions
+
+
+async def test_similar_name_embedding_pairs_names_for_jev(make_memory):
+    extractor = SentenceExtractor(entities={"k8s": ("K8s", "system"), "kubernetes": ("Kubernetes", "system")})
+    judge = FakeJudge(merge=merges_only(("Kubernetes", "K8s")))
+    mem = await make_memory(extractor=extractor, judge=judge, embedder=SynonymEmbedder({"k8s": "kubernetes"}))
+    await mem.insert(ORG, Text(text="All services are deployed to k8s."), idempotency_key="a")
+    await mem.insert(ORG, Text(text="The platform runs on kubernetes."), idempotency_key="b")
+    names = {e["name"]: e for e in await mem.entities(ORG)}
+    assert names["Kubernetes"]["active"] == 2 and "K8s" not in names
+    [(state, _)] = await merge_requests(judge)
+    assert state["judge_context"]["pairs"][0]["how_found"] == "similar name"
+
+
+async def test_look_alike_names_stay_apart_when_jev_says_no(make_memory):
+    extractor = SentenceExtractor(entities={"azure": ("Azure", "product"), "aws": ("AWS", "product")})
+    mem = await make_memory(extractor=extractor, judge=FakeJudge(merge=lambda a, b: 0.01),
+                            embedder=SynonymEmbedder({"aws": "azure"}))
+    await mem.insert(ORG, Text(text="The team prefers azure."), idempotency_key="a")
+    await mem.insert(ORG, Text(text="Some resources still run on aws."), idempotency_key="b")
+    assert {"Azure", "AWS"} <= {e["name"] for e in await mem.entities(ORG)}
+
+
+async def test_a_namesake_becomes_a_second_entity(make_memory):
+    extractor = SentenceExtractor(entities={"priya": ("Priya", "person")})
+    bakery = lambda a, b, pair: 0.05 if "bakery" in pair["a_fact"] or any("bakery" in f for f in pair["b_facts"]) else 0.9  # noqa: E731
+    judge = FakeJudge(merge=bakery)
+    mem = await make_memory(extractor=extractor, judge=judge)
+    await mem.insert(ORG, Text(text="Jonas had a call with Priya about Snowflake access."), idempotency_key="a")
+    await mem.insert(ORG, Text(text="Priya from the bakery recommended the sourdough."), idempotency_key="b")
+    await mem.insert(ORG, Text(text="Priya said the security team needs a ticket first."), idempotency_key="c")
+    rows = [r for r in await entity_rows(mem) if r["name"] == "Priya"]
+    assert [(r["name"], r["norm"]) for r in rows] == [("Priya", "priya"), ("Priya", "priya~2")]
+    ents = {r["norm"]: r for r in rows}
+    async with mem.ctx.pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT e.norm, f.text FROM memx_fact_entity fe JOIN memx_entity e ON e.id = fe.entity_id "
+            "JOIN memx_fact f ON f.id = fe.fact_id ORDER BY f.text")
+        links = {r["text"]: r["norm"] for r in await cur.fetchall()}
+    assert links["Priya from the bakery recommended the sourdough."] == "priya~2"
+    assert links["Priya said the security team needs a ticket first."] == "priya"
+    # The third mention was compared with both Priyas, with the identical-name wording.
+    state, questions = (await merge_requests(judge))[-1]
+    assert [p["how_found"] for p in state["judge_context"]["pairs"]] == ["identical name", "identical name"]
+    assert "Common first names" in questions["m0"].instructions
+    assert ents
+
+
+async def test_full_names_and_codes_link_without_asking(make_memory):
+    judge = FakeJudge()
+    mem = await make_memory(extractor=SentenceExtractor(), judge=judge)
+    await mem.insert(ORG, Text(text="Marcus Oyelaran approved retiring ARCHIVE-02."), idempotency_key="a")
+    await mem.insert(ORG, Text(text="Marcus Oyelaran will migrate ARCHIVE-02 data."), idempotency_key="b")
+    assert await merge_requests(judge) == []
+    names = {e["name"]: e["active"] for e in await mem.entities(ORG)}
+    assert names["Marcus Oyelaran"] == 2 and names["ARCHIVE-02"] == 2
+
+
+async def test_reresolve_merges_variants_found_through_alternative_names(make_memory):
+    extractor = SentenceExtractor(entities={"blore": ("Blore", "place", ["Bangalore"]), "bangalore": ("Bangalore", "place")})
+    judge = FakeJudge(merge=lambda a, b: 0.1)
+    mem = await make_memory(extractor=extractor, judge=judge)
+    await mem.insert(ORG, Text(text="Abhinandan is based in Blore."), idempotency_key="a")
+    await mem.insert(ORG, Text(text="Mahesh moved to Bangalore."), idempotency_key="b")
+    await mem.insert(ORG, Text(text="The Bangalore office opens at nine."), idempotency_key="c")
+    assert {"Blore", "Bangalore"} <= {e["name"] for e in await mem.entities(ORG)}
+    judge.merge = merges_only(("Blore", "Bangalore"))
+    report = await mem.reresolve_entities()
+    merged = [r for r in report if r["merged"]]
+    assert merged == [{"tenant": "halvorsen", "short": "Blore", "into": "Bangalore", "how": "suggested alternative name",
+                       "p_same": 0.9, "merged": True}]  # the one with fewer facts folds into the one with more
+    names = {e["name"]: e for e in await mem.entities(ORG)}
+    assert "Blore" not in names and names["Bangalore"]["active"] == 3
+
+
+
+async def test_identical_names_stay_together_unless_jev_is_sure_they_differ(make_memory):
+    extractor = SentenceExtractor(entities={"mahesh": ("Mahesh", "person")})
+    unsure = lambda a, b, pair: 0.3  # noqa: E731  (p_same 0.3, p_different 0.65: not sure either way)
+    judge = FakeJudge(merge=unsure)
+    mem = await make_memory(extractor=extractor, judge=judge)
+    await mem.insert(ORG, Text(text="Mahesh moved to Bangalore last year."), idempotency_key="a")
+    await mem.insert(ORG, Text(text="Mahesh joined the data team in March."), idempotency_key="b")
+    rows = [r for r in await entity_rows(mem) if r["name"] == "Mahesh"]
+    assert [r["norm"] for r in rows] == ["mahesh"]
+
+
+async def test_names_repeated_in_one_insert_are_not_questioned(make_memory):
+    extractor = SentenceExtractor(entities={"mahesh": ("Mahesh", "person")})
+    judge = FakeJudge(merge=lambda a, b: 0.01)
+    mem = await make_memory(extractor=extractor, judge=judge)
+    await mem.insert(ORG, Text(text="Mahesh moved to Bangalore. Mahesh joined the data team."), idempotency_key="a")
+    assert [r["norm"] for r in await entity_rows(mem) if r["name"] == "Mahesh"] == ["mahesh"]
+    assert await merge_requests(judge) == []

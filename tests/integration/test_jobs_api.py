@@ -172,3 +172,22 @@ async def test_api_reports_provider_refusal_clearly(make_memory):
                          json={"input": {"kind": "text", "text": "The user likes tea."}, "mode": "inline"})
     assert r.status_code == 502
     assert r.json()["detail"] == "The model provider refused the request: Key limit exceeded (daily limit)."
+
+
+async def test_resending_abandoned_ingest_resumes_it(make_memory):
+    """A process that dies mid-ingest leaves the ingest in ``received`` and its job ``running``. Once the lease has
+    expired, resending the same key must run it; while the lease is live, the resend must leave it alone."""
+    extractor = FlakyExtractor()
+    mem = await make_memory(extractor=extractor)
+    with pytest.raises(ProviderError):
+        await mem.insert(SCOPE, say("The user likes tea."), idempotency_key="lost")
+    async with mem.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE memx_ingest SET status = 'received', error = NULL, candidates = NULL")
+        await conn.execute("UPDATE memx_job SET status = 'running', locked_at = now(), locked_by = 'pod-a'")
+    extractor.fail = False
+    receipt = await mem.insert(SCOPE, say("The user likes tea."), idempotency_key="lost")
+    assert receipt.status == "received" and (await mem.facts(SCOPE)) == []  # someone is still working on it
+    async with mem.ctx.pool.connection() as conn:
+        await conn.execute("UPDATE memx_job SET locked_at = now() - interval '1 hour'")
+    receipt = await mem.insert(SCOPE, say("The user likes tea."), idempotency_key="lost")
+    assert receipt.status == "committed" and receipt.added == 1

@@ -7,3 +7,11 @@ eval/longmemeval/results
 .pytest_cache
 web/node_modules
 memx_api/static
+.git
+eval
+docs
+tests
+k8s
+*.md
+!README.md
+.env.example

@@ -1,0 +1,53 @@
+% Memory-X technical report. Build: make -C docs/paper/tech-report (xelatex, two passes).
+% Figures: see make_figures.py (reads the benchmark database and eval/ result files).
+\documentclass[10pt,letterpaper]{article}
+\input{preamble.tex}
+\usetikzlibrary{shapes.geometric,shapes.misc,decorations.pathreplacing,matrix}
+\definecolor{jev}{HTML}{C2410C}
+\definecolor{gen}{HTML}{3B5BDB}
+\definecolor{pg}{HTML}{0D9488}
+\definecolor{boxorange}{HTML}{FFF1E6}
+\definecolor{boxpurple}{HTML}{F3E8FF}
+\definecolor{shadowc}{HTML}{DC2626}
+\newcommand{\TBD}[1]{{\color{red}\textbf{[#1]}}}
+\newcommand{\theadm}[1]{{\sffamily\small\begin{tabular}[b]{@{}c@{}}#1\end{tabular}}}
+\newcommand{\yes}{\textcolor{pg}{\ding{51}}}
+\newcommand{\no}{\textcolor{muted}{--}}
+\newcommand{\half}{\textcolor{jev}{$\circ$}}
+\usepackage{pifont}
+\usepackage{amsmath}
+\usepackage[normalem]{ulem}
+
+\begin{document}
+
+% ================================================================= title block
+\thispagestyle{fancy}
+\begin{tcolorbox}[enhanced,colback=titlebg,colframe=titlebg,arc=6pt,boxrule=0pt,
+  left=14pt,right=14pt,top=12pt,bottom=10pt]
+{\sffamily\fontsize{9}{11}\selectfont\color{accent} TECHNICAL REPORT\par}
+\vspace{3pt}
+{\raggedright\sffamily\fontsize{22}{27}\selectfont\color{ink} Memory-X: Calibrated Decisions for Scoped, Auditable Agent Memory\par}
+\vspace{2pt}
+{\sffamily\fontsize{12.5}{16}\selectfont\color{muted} A Generative Writer, a Calibrated Judge, and a Scope Tree\par}
+\vspace{6pt}
+{\fontsize{10.5}{13}\selectfont Jyotish Bora\par}
+\vspace{1pt}
+{\footnotesize\ttfamily jyotish.bora@datagol.ai\quad{\rmfamily DataGOL}\par}
+\vspace{10pt}
+{\sffamily\bfseries\small Abstract\par}
+\vspace{2pt}
+{\small\setlength{\parskip}{4pt}
+\input{abstract.tex}
+\par}
+\vspace{8pt}
+{\footnotesize\color{muted} November 2026}\hfill
+\begin{tikzpicture}[baseline=1.5mm]
+  \node[fill=linkblue,rounded corners=3pt,minimum width=7.5mm,minimum height=7.5mm,text=white,
+        font=\sffamily\bfseries\small,inner sep=0pt] {MX};
+\end{tikzpicture}
+\end{tcolorbox}
+
+\vspace{4pt}
+\input{body.tex}
+
+\end{document}

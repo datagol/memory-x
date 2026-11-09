@@ -5,6 +5,7 @@ import { api, type Category } from "../lib/api";
 import { useApp } from "../lib/app";
 import { CATEGORIES, CATEGORY_LABEL, fmtDate, num } from "../lib/meta";
 import { statusTone } from "../components/FactDrawer";
+import { ScopeSettingsCard } from "../components/ScopeSettings";
 import { Card, CategoryChip, ConfirmButton, Empty, ErrorBox, Loading, MemoryMarkdown, Pill, Seg, useToast } from "../components/ui";
 
 export function MemoryPage() {
@@ -49,6 +50,7 @@ export function MemoryPage() {
           </ConfirmButton>
         </div>
       </div>
+      <ScopeSettingsCard scope={scope} />
       <div className="split">
         <Card
           title="Agent view"

@@ -12,10 +12,11 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
 from memx.config import InsertMode
+from memx.documents import DocumentError, read_document
 from memx.providers.http import ProviderError
 from memx.types import Category, Fact, FactHistory, ForgetReport, IngestInput, InsertReceipt, Recall, RecallMode, Turn
 from memx_api import dashboard
@@ -26,6 +27,15 @@ STATIC = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = MemxConfig()
+    app.state.config, app.state.startup_error, app.state.memory = cfg, None, None
+    if cfg.providers != "demo" and not cfg.has_api_key():
+        # Start anyway, so the dashboard can say what is missing instead of the container restarting in a loop.
+        app.state.startup_error = (
+            "OPENROUTER_API_KEY is not set. Add it to .env (copy .env.example), then run `docker compose up -d`. "
+            "One OpenRouter key covers extraction, embeddings and Jev. To try memx without a key, run the demo: "
+            "docker compose -f compose.demo.yml up -d")
+        yield
+        return
     if cfg.providers == "demo":
         from memx.testing import demo_providers
 
@@ -41,11 +51,16 @@ app = FastAPI(title="memx", version="0.1.0", lifespan=lifespan)
 
 
 def memory(request: Request) -> Memory:
-    return request.app.state.memory
+    mem = getattr(request.app.state, "memory", None)
+    if mem is None:
+        raise HTTPException(status_code=503, detail=getattr(request.app.state, "startup_error", None)
+                            or "memx is not connected")
+    return mem
 
 
 def require_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
-    token = request.app.state.memory.ctx.config.api_token
+    mem = getattr(request.app.state, "memory", None)
+    token = (mem.ctx.config if mem is not None else request.app.state.config).api_token
     if token is None or not token.get_secret_value():
         return
     expected = f"Bearer {token.get_secret_value()}"
@@ -113,6 +128,30 @@ async def create_ingest(scope: str, body: IngestBody, mem: Mem, response: Respon
     return receipt
 
 
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+@app.post("/v1/documents/extract", dependencies=v1)
+async def extract_document(request: Request, mem: Mem, filename: str | None = None) -> dict[str, Any]:
+    """Turn an uploaded PDF or text file (sent as the raw request body) into the text a ``Text`` ingest takes.
+
+    Nothing is stored: the caller reviews the text and then posts it to ``/v1/scopes/{scope}/ingests``.
+    """
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=422, detail="the request body is empty; send the file's bytes")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"the file is over {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    try:
+        doc = read_document(data, filename)
+    except DocumentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    limit = mem.ctx.config.max_input_chars
+    return {"text": doc.text, "kind": doc.kind, "filename": doc.filename, "pages": doc.pages,
+            "empty_pages": doc.empty_pages, "chars": len(doc.text), "max_chars": limit,
+            "too_large": len(doc.text) > limit}
+
+
 @app.get("/v1/ingests/{ingest_id}", response_model=InsertReceipt, dependencies=v1)
 async def get_ingest(ingest_id: UUID, mem: Mem) -> InsertReceipt:
     return await mem.receipt(ingest_id, with_facts=True)
@@ -126,6 +165,21 @@ async def recall(scope: str, body: RecallBody, mem: Mem) -> Recall:
                                 as_of=body.as_of, explain=body.explain)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/v1/scopes/{scope}/settings", dependencies=v1)
+async def get_scope_settings(scope: str, mem: Mem) -> dict[str, Any]:
+    return await mem.scope_settings(scope)
+
+
+@app.patch("/v1/scopes/{scope}/settings", dependencies=v1)
+async def patch_scope_settings(scope: str, body: dict[str, Any], mem: Mem) -> dict[str, Any]:
+    """Set overrides for this scope and below. A key with ``null`` removes the override (inherit again)."""
+    try:
+        return await mem.set_scope_settings(scope, **body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="; ".join(
+            f"{'.'.join(str(x) for x in e['loc']) or 'body'}: {e['msg']}" for e in exc.errors())) from exc
 
 
 @app.get("/v1/scopes/{scope}/render", response_class=PlainTextResponse, dependencies=v1)

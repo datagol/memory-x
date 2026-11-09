@@ -126,8 +126,23 @@ def make_windows(
     return windows
 
 
+MIN_SPLIT_CHARS = 400
+
+
+def can_split(window: Window) -> bool:
+    return len(window.units) > 1 or (bool(window.units) and len(window.units[0].text) >= MIN_SPLIT_CHARS)
+
+
 def split_window(window: Window, context_turns: int) -> tuple[Window, Window]:
-    """Halve a window whose extraction hit the candidate cap."""
+    """Halve a window whose extraction hit the candidate cap. A window of one long unit (a long message or
+    paragraph full of facts) is split inside that unit, at a paragraph or sentence boundary."""
+    if len(window.units) == 1:
+        unit = window.units[0]
+        halves = _split_long(unit.text, len(unit.text) // 2 + 1)
+        cut = max(1, len(halves) // 2)
+        window = Window(window.index, window.kind,
+                        [Unit(unit.role, " ".join(halves[:cut]), unit.at), Unit(unit.role, " ".join(halves[cut:]), unit.at)],
+                        window.context, window.source)
     mid = len(window.units) // 2
     first = Window(window.index, window.kind, window.units[:mid], window.context, window.source)
     second = Window(

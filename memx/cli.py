@@ -17,6 +17,12 @@ from memx.types import Messages, Text, Turn
 
 
 async def _worker(args: argparse.Namespace) -> None:
+    cfg = MemxConfig()
+    if cfg.providers != "demo" and not cfg.has_api_key():
+        # Idle, not crash: a restart loop would hide the message among restarts. Set the key and restart.
+        logging.getLogger("memx").error("OPENROUTER_API_KEY is not set; the worker is idle. Add it to .env and run "
+                                        "`docker compose up -d`.")
+        await asyncio.Event().wait()
     mem = await Memory.connect(start_runner=False)
     runner = await mem.start_runner(concurrency=args.concurrency)
     stop = asyncio.Event()
@@ -62,7 +68,20 @@ async def _run(args: argparse.Namespace) -> None:
         elif args.cmd == "entities-reresolve":
             for row in await mem.reresolve_entities(args.tenant):
                 verb = "merged into" if row["merged"] else "kept apart from"
-                print(f"[{row['tenant']}] {row['short']!r} {verb} {row['into']!r} (Jev {row['p_same']:.0%} same)")
+                print(f"[{row['tenant']}] {row['short']!r} {verb} {row['into']!r} "
+                      f"({row['how']}, Jev {row['p_same']:.0%} same)")
+        elif args.cmd == "rereconcile":
+            report = await mem.rereconcile(args.scope, dry_run=args.dry_run)
+            for c in report.changes[: args.show]:
+                print(f"{c['action']:<9} {c['reason']:<20} p={c['probability']:.2f}  {c['fact']!r}  (by {c['by']!r})")
+            verb = "would restore" if args.dry_run else "restored"
+            print(f"checked {report.checked}: {verb} {report.restored}, unshadowed {report.unshadowed}, "
+                  f"kept {report.kept}; reasons {report.reasons}; left alone {report.skipped}")
+        elif args.cmd == "expiry-reapply":
+            report = await mem.reapply_event_expiry(args.scope, dry_run=args.dry_run)
+            verb = "would change" if args.dry_run else "changed"
+            print(f"checked {report['checked']} dated events: {verb} {report['changed']}, revived {report['revived']}"
+                  f"{', skipped (duplicate) ' + str(report['skipped_duplicate']) if report['skipped_duplicate'] else ''}")
         elif args.cmd == "export":
             data, report = await mem.export_okf(args.scope)
             Path(args.out).write_bytes(data)
@@ -97,6 +116,13 @@ def main(argv: list[str] | None = None) -> None:
     e.add_argument("out")
     er = sub.add_parser("entities-reresolve", help="re-ask Jev about short entity names and merge agreed ones")
     er.add_argument("--tenant", default=None, help="one tenant (the label under memory); default: all")
+    rr = sub.add_parser("rereconcile", help="undo logged replacements the current policy would not make")
+    rr.add_argument("--scope", default=None, help="this scope and everything under it; default: all")
+    rr.add_argument("--dry-run", action="store_true", help="report only")
+    rr.add_argument("--show", type=int, default=20, help="print this many changes")
+    ex = sub.add_parser("expiry-reapply", help="recompute event expiry under the current settings")
+    ex.add_argument("--scope", default=None, help="this scope and everything under it; default: all")
+    ex.add_argument("--dry-run", action="store_true", help="report only")
     s = sub.add_parser("serve", help="run the HTTP API")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8000)

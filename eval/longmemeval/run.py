@@ -44,12 +44,42 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "ranked_2k": {"recall": {"force_mode": "ranked", "budget_tokens": 2_000}},
     "ranked_4k": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}},
     "auto_4k": {"recall": {"budget_tokens": 4_000}},
+    "no_walk": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "memx": {"walk_enabled": False}},
     "no_jev_grade": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "memx": {"grade_enabled": False}},
     "no_decay": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000},
                  "memx": {"half_lives": {k: None for k in ("identity", "rule", "preference", "goal", "relationship",
                                                            "work_context", "event", "procedure", "other")}}},
     "no_hint": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "memx": {"sort_use_hint": False},
                 "ingest_tag": "nohint"},
+    # Reconcile policy before the accuracy fixes: 0.5 floors, no guards. Ingests into its own scopes.
+    "legacy_policy": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "legacy",
+                      "memx": {"verdict_same_min": 0.5, "verdict_min_prob": 0.5, "verdict_guards": False}},
+    "legacy_policy_full": {"recall": {"force_mode": "full", "budget_tokens": 200_000}, "ingest_tag": "legacy",
+                           "memx": {"verdict_same_min": 0.5, "verdict_min_prob": 0.5, "verdict_guards": False}},
+    # Current policy (floors 0.9 / 0.8 and guards), with and without the borderline coexist question.
+    "policy": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "policy"},
+    "policy_full": {"recall": {"force_mode": "full", "budget_tokens": 200_000}, "ingest_tag": "policy"},
+    "policy_confirm": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "confirm",
+                       "memx": {"verdict_confirm": True}},
+    # Cost cuts: lists as one fact, no general assistant explanations, slim schema, continuation instead of
+    # re-extraction, prompt caching, chit-chat gate; recall shows replaced versions when the question asks.
+    "lean": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "lean"},
+    "lean_full": {"recall": {"force_mode": "full", "budget_tokens": 200_000}, "ingest_tag": "lean"},
+    # Relevance cut 0.10 instead of 0.30: fill the ranked block with the best-scoring facts (helped on LoCoMo).
+    # The pre-2026-11-08 recall defaults, for paired comparisons against runs made with them.
+    "lean_narrow": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "lean",
+                    "memx": {"grade_floor": 0.3, "recall_k_vector": 40, "recall_k_fts": 20, "grade_max": 40,
+                             "recall_k_max": 30}},
+    # Wide ranked recall, spelled out so the comparison does not move when the defaults do.
+    "lean_wide": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "lean",
+                  "memx": {"grade_floor": 0.1, "recall_k_vector": 80, "recall_k_fts": 30, "grade_max": 90,
+                           "recall_k_max": 80}},
+    # Floor 0.1 with the old 30-fact cap: the small-block option (pinned so it does not follow the defaults).
+    "lean_fill": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "lean",
+                  "memx": {"grade_floor": 0.1, "recall_k_vector": 40, "recall_k_fts": 20, "grade_max": 40,
+                           "recall_k_max": 30}},
+    "lean_nowalk": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000}, "ingest_tag": "lean",
+                    "memx": {"walk_enabled": False}},
     "no_assistant_facts": {"recall": {"force_mode": "ranked", "budget_tokens": 4_000},
                            "ingest_tag": "noasst", "drop_assistant": True},
 }
@@ -60,7 +90,7 @@ ANSWER_PROMPT = """You are a helpful assistant with a long-term memory of past c
 
 Current date: {question_date}
 
-Answer the user's question using the memory above. If the memory does not contain the information needed, say you don't know.
+Answer the user's question using the memory above. If the memory does not contain the information needed, say you don't know. When the user asks for suggestions, recommendations, tips or ideas, give them: build on what the memory records about the user's interests, background, plans and past activities, and say which remembered details you are building on. Count or compute from the remembered facts when the question asks for a number or a duration.
 
 Question: {question}
 Answer:"""
@@ -115,12 +145,17 @@ def select(items: list[dict], per_type: int, abstention: int, seed: int) -> list
     return chosen
 
 
-async def chat(http: OpenRouterHTTP, model: str, prompt: str, max_tokens: int = 512) -> tuple[str, dict]:
-    data = await http.post("/chat/completions", {
-        "model": model, "temperature": 0, "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    })
-    return (data["choices"][0]["message"].get("content") or "").strip(), data.get("usage") or {}
+async def chat(http: OpenRouterHTTP, model: str, prompt: str, max_tokens: int = 2000) -> tuple[str, dict]:
+    """Thinking models (Haiku 5.5, Sonnet 5.5) spend output tokens on reasoning first; leave room, and if the answer
+    still comes back empty, ask again without thinking."""
+    body = {"model": model, "temperature": 0, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}]}
+    data = await http.post("/chat/completions", body)
+    text = (data["choices"][0]["message"].get("content") or "").strip()
+    if not text:
+        data = await http.post("/chat/completions", {**body, "reasoning": {"enabled": False}})
+        text = (data["choices"][0]["message"].get("content") or "").strip()
+    return text, data.get("usage") or {}
 
 
 def judge_prompt(item: dict, response: str) -> str:
@@ -162,6 +197,29 @@ async def evidence_recall(mem: Memory, scope: str, item: dict, fact_ids: list) -
     return len(hit & answer_sessions) / len(answer_sessions)
 
 
+async def ingest_usage(mem: Memory, scope: str) -> dict:
+    """Extraction tokens and Jev cost for every ingest of a question (from receipts; older ingests lack Jev cost)."""
+    async with mem.ctx.pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT coalesce(sum(tokens_in), 0) AS tin, coalesce(sum(tokens_out), 0) AS tout, count(*) AS ingests, "
+            "coalesce(sum((receipt->'usage'->>'jev_cost_usd')::float), 0) AS jev_usd, "
+            "coalesce(sum((receipt->'usage'->>'jev_requests')::int), 0) AS jev_requests, "
+            "coalesce(sum((receipt->'usage'->>'extract_splits')::int), 0) AS splits, "
+            "coalesce(sum((receipt->'usage'->>'extract_wasted_tokens_out')::int), 0) AS wasted_out, "
+            "coalesce(sum((receipt->'usage'->>'extract_cached_tokens_in')::int), 0) AS cached_in, "
+            "coalesce(sum((receipt->'usage'->>'extract_continuations')::int), 0) AS continuations, "
+            "coalesce(sum((receipt->'usage'->>'gate_turns_skipped')::int), 0) AS gate_skipped, "
+            "max(extractor_model) AS model FROM memx_ingest WHERE scope = %s::ltree", (scope,))
+        row = await cur.fetchone()
+        cur = await conn.execute("SELECT count(*) AS n FROM memx_fact WHERE scope = %s::ltree", (scope,))
+        facts = (await cur.fetchone())["n"]
+    return {"extract_tokens_in": int(row["tin"]), "extract_tokens_out": int(row["tout"]), "ingests": row["ingests"],
+            "jev_usd": round(float(row["jev_usd"]), 5), "jev_requests": int(row["jev_requests"]),
+            "extract_splits": int(row["splits"]), "extract_wasted_tokens_out": int(row["wasted_out"]),
+            "extract_cached_tokens_in": int(row["cached_in"]), "extract_continuations": int(row["continuations"]),
+            "gate_turns_skipped": int(row["gate_skipped"]), "extractor_model": row["model"], "facts": facts}
+
+
 async def run_one(mem: Memory, http: OpenRouterHTTP, item: dict, cfg_name: str, run_id: str, args) -> dict:
     spec = CONFIGS[cfg_name]
     scope = f"memory.lme.{spec.get('ingest_tag', 'base')}.{scope_label(item['question_id'])}"
@@ -174,7 +232,7 @@ async def run_one(mem: Memory, http: OpenRouterHTTP, item: dict, cfg_name: str, 
     memory = recall.markdown or "(no relevant memories)"
     answer, _ = await chat(http, args.answer_model, ANSWER_PROMPT.format(
         memory=memory, question_date=item.get("question_date", ""), question=item["question"]))
-    verdict_text, _ = await chat(http, args.judge_model, judge_prompt(item, answer), max_tokens=400)
+    verdict_text, _ = await chat(http, args.judge_model, judge_prompt(item, answer), max_tokens=1000)
     return {
         "run_id": run_id, "config": cfg_name, "question_id": item["question_id"],
         "question_type": "abstention" if item["question_id"].endswith("_abs") else item["question_type"],
@@ -184,6 +242,7 @@ async def run_one(mem: Memory, http: OpenRouterHTTP, item: dict, cfg_name: str, 
         "memory_tokens": recall.token_count, "evidence_recall": await evidence_recall(
             mem, scope, item, [f.id for f in recall.facts]),
         "ingest_s": round(t1 - t0, 2), "recall_ms": round((t2 - t1) * 1000),
+        "usage": await ingest_usage(mem, scope),
     }
 
 
@@ -207,6 +266,10 @@ def summarize(rows: list[dict]) -> dict:
 async def main_async(args) -> None:
     items = json.loads(DATA.read_text())
     chosen = select(items, args.per_type, args.abstention, args.seed)
+    if args.ids:
+        wanted = [line.strip() for line in Path(args.ids).read_text().splitlines() if line.strip()]
+        by_id = {i["question_id"]: i for i in items}
+        chosen = [by_id[q] for q in wanted]
     if args.limit:
         chosen = chosen[: args.limit]
     run_id = args.resume or datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
@@ -217,8 +280,8 @@ async def main_async(args) -> None:
         answered = {r["question_id"] for r in previous}
         todo = [i for i in chosen if i["question_id"] not in answered]
         spec = CONFIGS[cfg_name]
-        mem = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline", **spec.get("memx", {})),
-                                   start_runner=False)
+        overrides = {**({"extractor_model": args.extract_model} if args.extract_model else {}), **spec.get("memx", {})}
+        mem = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline", **overrides), start_runner=False)
         http = OpenRouterHTTP(mem.ctx.config.api_key(), mem.ctx.config.openrouter_base_url, timeout_s=120)
         sem = asyncio.Semaphore(args.concurrency)
 
@@ -249,9 +312,11 @@ def main() -> None:
     p.add_argument("--per-type", type=int, default=25)
     p.add_argument("--abstention", type=int, default=20)
     p.add_argument("--limit", type=int, default=0, help="cap total questions (smoke runs)")
+    p.add_argument("--ids", default=None, help="file of question ids to run instead of the seeded sample")
+    p.add_argument("--extract-model", default=None, help="extractor model (default: MemxConfig / MEMX_EXTRACTOR_MODEL)")
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--concurrency", type=int, default=4)
-    p.add_argument("--answer-model", default="anthropic/claude-haiku-4.5")
+    p.add_argument("--answer-model", default="anthropic/claude-haiku-5.5")
     p.add_argument("--judge-model", default="anthropic/claude-sonnet-5.5")
     p.add_argument("--resume", default=None, help="run id to complete: skips questions already in its results")
     p.add_argument("--dsn", default=BENCH_DSN, help="database for benchmark memory (default: memx_bench)")

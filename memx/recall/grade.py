@@ -10,11 +10,25 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from memx.providers.jev import UNTRUSTED_NOTE, Judge, JudgeResult, Score, clip, envelope
+from memx.providers.jev import (
+    UNTRUSTED_NOTE,
+    Judge,
+    JudgeResult,
+    Question,
+    Score,
+    YesNo,
+    clip,
+    envelope,
+)
 from memx.timewords import age_phrase, event_phrase
 from memx.types import Category, Fact, PathStep, Turn
 
 GRADE_VERSION = "grade.v3"  # v2 added the link context for walked facts; v3 also for linked search hits
+
+HISTORY_QUESTION = YesNo(
+    "Does `untrusted.query` ask about an earlier, previous, original or changed state of something (what it used "
+    "to be, what it was before, how it changed), rather than only its current state? " + UNTRUSTED_NOTE
+)
 
 LEVELS = [
     "irrelevant: no bearing on the query or the conversation",
@@ -75,7 +89,7 @@ def grade_question(i: int, walked: bool) -> Score:
 
 async def grade(judge: Judge, query: str, recent_turns: list[Turn] | None, facts: list[Fact], scope: str,
                 now: datetime, paths: dict[int, list[PathStep]] | None = None,
-                both: set[int] | None = None) -> tuple[list[float], JudgeResult]:
+                both: set[int] | None = None, ask_history: bool = False) -> tuple[list[float], JudgeResult]:
     """Relevance in [0, 1] per fact, plus the raw judge result for the decision log.
 
     A fact with a path is judged together with the fact it links to. Facts in ``both`` (search hits that also
@@ -85,8 +99,11 @@ async def grade(judge: Judge, query: str, recent_turns: list[Turn] | None, facts
         return [], JudgeResult(answers={}, latency_ms=0)
     paths = paths or {}
     both = {i for i in (both or set()) if paths.get(i)}
-    questions = {f"f{i}": grade_question(i, bool(paths.get(i)) and i not in both) for i in range(len(facts))}
+    questions: dict[str, Question] = {f"f{i}": grade_question(i, bool(paths.get(i)) and i not in both)
+                                      for i in range(len(facts))}
     questions |= {f"f{i}_l": grade_question(i, True) for i in both}
+    if ask_history:
+        questions["history"] = HISTORY_QUESTION
     res = await judge.ask(grade_state(query, recent_turns, facts, scope, now, paths), questions)
     top = len(LEVELS) - 1
     out = []

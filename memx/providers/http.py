@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import ssl
 from typing import Any
 
 import httpx
@@ -42,9 +43,10 @@ class OpenRouterHTTP:
         for attempt in range(self._attempts):
             try:
                 resp = await self._client.post(path, json=body)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, ssl.SSLError) as exc:  # TLS record errors can escape httpx under load
                 last = ProviderError(f"{path}: {type(exc).__name__}: {exc}", retryable=True)
-                if isinstance(exc, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.ConnectError)):
+                if isinstance(exc, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.ConnectError,
+                                    ssl.SSLError)):
                     await self._reset()
             else:
                 if resp.status_code == 429 or resp.status_code >= 500:
@@ -74,6 +76,27 @@ class OpenRouterHTTP:
                             raise last
                     else:
                         return data
+            if attempt < self._attempts - 1:
+                await asyncio.sleep(0.5 * 2**attempt + random.random() * 0.25)
+        assert last is not None
+        raise last
+
+    async def get(self, path: str) -> dict[str, Any]:
+        last: ProviderError | None = None
+        for attempt in range(self._attempts):
+            try:
+                resp = await self._client.get(path)
+            except (httpx.HTTPError, ssl.SSLError) as exc:
+                last = ProviderError(f"{path}: {type(exc).__name__}: {exc}", retryable=True)
+            else:
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    last = ProviderError(f"{path}: HTTP {resp.status_code}: {resp.text[:300]}", retryable=True,
+                                         status=resp.status_code)
+                elif resp.status_code >= 400:
+                    raise ProviderError(f"{path}: HTTP {resp.status_code}: {resp.text[:500]}", retryable=False,
+                                        status=resp.status_code)
+                else:
+                    return resp.json()
             if attempt < self._attempts - 1:
                 await asyncio.sleep(0.5 * 2**attempt + random.random() * 0.25)
         assert last is not None

@@ -8,13 +8,14 @@ RUN pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build   # writes /src/memx_api/static
 
-# 2) API + worker image
+# 2) One image for the API, the worker and the MCP server
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml ./
 COPY memx ./memx
 COPY memx_api ./memx_api
+COPY memx_mcp ./memx_mcp
 COPY --from=web /src/memx_api/static ./memx_api/static
 RUN pip install --no-cache-dir .
 RUN useradd --create-home memx

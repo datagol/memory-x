@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from memx import Memory, NotFound
 from memx.db import repo
@@ -19,7 +19,11 @@ from memx.types import CATEGORY_DEFINITIONS, RENDER_ORDER, TOPIC_DEFINITIONS
 
 
 def memory(request: Request) -> Memory:
-    return request.app.state.memory
+    mem = getattr(request.app.state, "memory", None)
+    if mem is None:
+        raise HTTPException(status_code=503, detail=getattr(request.app.state, "startup_error", None)
+                            or "memx is not connected")
+    return mem
 
 
 Mem = Annotated[Memory, Depends(memory)]
@@ -46,7 +50,9 @@ async def config(mem: Mem) -> dict[str, Any]:
         "models": {"extractor": c.extractor_model, "embedding": c.embedding_model, "judge": c.jev_model},
         "insert_mode": c.insert_mode,
         "bands": {"low": c.band_low, "high": c.band_high, "guard_min_jaccard": c.guard_min_jaccard},
-        "verdict": {"same_min": c.verdict_same_min, "min_prob": c.verdict_min_prob},
+        "verdict": {"same_min": c.verdict_same_min, "replace_min": c.verdict_replace_min,
+                    "covers_min": c.verdict_covers_min, "min_prob": c.verdict_min_prob,
+                    "confirm": c.verdict_confirm, "confirm_band": list(c.verdict_confirm_band)},
         "sort": {"min_prob": c.sort_min_prob, "min_confidence": c.sort_min_confidence,
                  "injection_flag": c.injection_flag, "injection_reject": c.injection_reject},
         "recall": {"budget_tokens": c.budget_tokens, "budget_safety": c.budget_safety, "grade_floor": c.grade_floor,
@@ -54,6 +60,7 @@ async def config(mem: Mem) -> dict[str, Any]:
         "decay": {"half_lives": c.half_lives, "access_boost_cap": c.access_boost_cap},
         "trust": {"user": c.user_trust, "assistant": c.assistant_trust, "text_default": c.default_text_trust},
         "window_tokens": c.window_tokens,
+        "event_ttl_days": c.event_ttl_days,
         "categories": [{"key": k.value, "definition": CATEGORY_DEFINITIONS[k.value]} for k in RENDER_ORDER],
         "entities": {"enabled": c.entities_enabled, "merge_min": c.entity_merge_min, "topic_min": c.topic_min},
         "walk": {"enabled": c.walk_enabled, "hops": c.walk_hops, "decay": c.walk_decay, "cap": c.walk_cap,

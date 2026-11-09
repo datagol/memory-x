@@ -10,7 +10,12 @@ from psycopg import AsyncConnection
 
 from memx.config import MemxConfig
 from memx.db import repo
-from memx.pipeline.entities import EntityPlan, apply_entities, entity_decisions, tenant_of
+from memx.pipeline.entities import (
+    EntityPlan,
+    apply_entities,
+    entity_decisions,
+    tenant_of,
+)
 from memx.pipeline.reconcile import VERDICT_VERSION, Plan, Verdict
 from memx.pipeline.similarity import lexical_guard, text_hash
 from memx.pipeline.sort import SORT_VERSION, SortResult
@@ -28,12 +33,14 @@ def speaker_trust(cfg: MemxConfig, ingest: dict[str, Any], speaker: str) -> floa
 
 def event_times(cfg: MemxConfig, candidate: Candidate, category: Category, observed_at: datetime,
                 settings: dict[str, Any]) -> tuple[datetime | None, datetime | None]:
-    """Upcoming events ("on PTO next week") expire after their date. Past and undated events are history:
-    they never expire, and the event half-life fades them in ranking instead."""
+    """Upcoming events ("on PTO next week") can expire after their date when an expiry is configured (per scope or
+    server-wide). By default nothing expires: past and upcoming events alike fade with the event half-life."""
     event_at = datetime.combine(candidate.event_date, time(12), tzinfo=UTC) if candidate.event_date else None
-    if category != Category.event or event_at is None or event_at.date() < observed_at.date():
+    # 0 set on a scope means "never", even when the server default expires events; only a missing key falls back.
+    ttl = settings["event_ttl_days"] if "event_ttl_days" in settings else cfg.event_ttl_days
+    if category != Category.event or event_at is None or event_at.date() < observed_at.date() or not ttl:
         return event_at, None
-    return event_at, event_at + timedelta(days=settings.get("event_ttl_days") or cfg.event_ttl_days)
+    return event_at, event_at + timedelta(days=ttl)
 
 
 def sort_decision(ingest: dict[str, Any], candidate: Candidate, sort: SortResult | None, scope: str,
@@ -61,7 +68,13 @@ def verdict_decisions(ingest: dict[str, Any], candidate: Candidate, verdicts: li
             "ingest_id": ingest["id"], "candidate_index": candidate.index, "subject_fact_id": subject,
             "object_fact_id": v.neighbor["id"], "scope": scope, "similarity": v.similarity,
             "result": {"label": v.label, "probability": v.probability, "probabilities": v.probabilities,
-                       "candidate": candidate.text, "neighbor": v.neighbor["text"]},
+                       "candidate": candidate.text, "neighbor": v.neighbor["text"],
+                       **({"acted": v.acted} if v.acted and v.acted != v.label else {}),
+                       **({"reason": v.reason} if v.reason else {}),
+                       **({"coexist": round(v.coexist, 4)} if v.coexist is not None else {}),
+                       **({"same_attribute": round(v.same_attribute, 4)} if v.same_attribute is not None else {}),
+                       **({"candidate_attribute": candidate.attribute} if candidate.attribute else {}),
+                       **({"neighbor_attribute": v.neighbor["attribute"]} if v.neighbor.get("attribute") else {})},
             "latency_ms": v.latency_ms,
         }
         for v in verdicts
@@ -106,11 +119,14 @@ async def commit_candidate(
 
         outcome["verdicts"] = [
             {"neighbor_id": str(v.neighbor["id"]), "label": v.label, "probability": round(v.probability, 4),
-             "probabilities": v.probabilities, "source": v.source, "sim": round(v.similarity, 4)}
+             "probabilities": v.probabilities, "source": v.source, "sim": round(v.similarity, 4),
+             **({"acted": v.acted, "reason": v.reason} if v.reason else {})}
             for v in plan.verdicts
         ]
+        if plan.possible_replace:
+            outcome["possible_replace_ids"] = [str(i) for i in plan.possible_replace]
         if plan.action == "drop":
-            await repo.reinforce(conn, plan.reinforce)
+            await repo.reinforce(conn, plan.reinforce, ingest["observed_at"])
             active = await repo.still_active(conn, plan.supersede_below)
             retired = await repo.supersede_below(
                 conn, [i for i in plan.supersede_below if i in active], plan.reinforce, scope)
@@ -152,7 +168,7 @@ async def commit_candidate(
                 "stale_after": stale_after,
                 "topic": sort.topic,
                 "topic_confidence": sort.topic_confidence,
-                "attrs": {"time_text": candidate.time_text, "window": candidate.window,
+                "attrs": {"time_text": candidate.time_text, "window": candidate.window, "attribute": candidate.attribute,
                           "category_hint": candidate.category_hint.value if candidate.category_hint else None},
             })
             if fact_id is None:  # committed by an earlier attempt of this job

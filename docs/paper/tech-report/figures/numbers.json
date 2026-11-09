@@ -1,0 +1,722 @@
+{
+  "fig_sort": {
+    "candidates": 85013,
+    "other_share": 0.3448766659216826,
+    "other_chosen_share": 0.22158963923164693,
+    "cat_median_top": 0.83,
+    "theme_median_top": 0.81,
+    "injection_flagged": 70
+  },
+  "fig_reconcile": {
+    "neighbors": 989227,
+    "bands": {
+      "below": 514037,
+      "judge": 310766,
+      "over_cap": 164283,
+      "auto": 6,
+      "not_needed": 115,
+      "exact": 20
+    },
+    "verdicts": 311823,
+    "labels": {
+      "related": 231658,
+      "unrelated": 67231,
+      "same": 1880,
+      "candidate_replaces": 5499,
+      "neighbor_covers": 5555
+    },
+    "outcomes": {
+      "added": 80307,
+      "dropped": 1359,
+      "superseded_on_arrival": 3346,
+      "null": 1,
+      "rejected": 2
+    },
+    "destructive": 11054,
+    "destructive_05_06": 3002,
+    "destructive_below_05": 2452
+  },
+  "fig_entities": {
+    "pairs": 42272,
+    "by_how": {
+      "identical name": 1297,
+      "shares a word": 6827,
+      "suggested alternative name": 180,
+      "similar name": 33968
+    },
+    "merged": 3593,
+    "entities": {
+      "n": 19359,
+      "aliased": 757
+    }
+  },
+  "fig_recall": {
+    "recalls": 450,
+    "candidates": 51.977777777777774,
+    "search": 48.57555555555555,
+    "walk": 3.402222222222222,
+    "graded": 43.40222222222222,
+    "above": 6.391111111111111,
+    "picked": 6.386666666666667,
+    "picked_by": {
+      "search": 2871,
+      "entity_hop": 3
+    },
+    "grades": {
+      "0": 5559,
+      "1": 12247,
+      "2": 1228,
+      "3": 497
+    }
+  },
+  "fig_latency": {
+    "sort": {
+      "n": 85362,
+      "p50": 178.0,
+      "p95": 271.0
+    },
+    "verdict": {
+      "n": 311823,
+      "p50": 166.0,
+      "p95": 238.0
+    },
+    "entity": {
+      "n": 17696,
+      "p50": 166.0,
+      "p95": 237.0
+    },
+    "grade": {
+      "n": 198,
+      "p50": 253.5,
+      "p95": 339.0
+    }
+  },
+  "fig_lme": {
+    "common": 82,
+    "v2_ranked": {
+      "acc": 80.48780487804879,
+      "tokens": 358.1951219512195,
+      "n": 82,
+      "k": 66
+    },
+    "v2_full": {
+      "acc": 89.02439024390245,
+      "tokens": 24463.768292682926,
+      "n": 82,
+      "k": 73
+    },
+    "mem0": {
+      "acc": 76.82926829268293,
+      "tokens": 1649.7560975609756,
+      "n": 82,
+      "k": 63
+    },
+    "chunk_rag": {
+      "acc": 73.17073170731707,
+      "tokens": 3967.731707317073,
+      "n": 82,
+      "k": 60
+    },
+    "full_context": {
+      "acc": 68.29268292682927,
+      "tokens": 117009.23170731707,
+      "n": 82,
+      "k": 56
+    },
+    "by_type": {
+      "v2_ranked": {
+        "single-session-user": [
+          11,
+          12
+        ],
+        "single-session-assistant": [
+          9,
+          12
+        ],
+        "single-session-preference": [
+          9,
+          12
+        ],
+        "multi-session": [
+          8,
+          12
+        ],
+        "knowledge-update": [
+          11,
+          12
+        ],
+        "temporal-reasoning": [
+          11,
+          12
+        ],
+        "abstention": [
+          7,
+          10
+        ]
+      },
+      "v2_full": {
+        "single-session-user": [
+          12,
+          12
+        ],
+        "single-session-assistant": [
+          10,
+          12
+        ],
+        "single-session-preference": [
+          11,
+          12
+        ],
+        "multi-session": [
+          10,
+          12
+        ],
+        "knowledge-update": [
+          11,
+          12
+        ],
+        "temporal-reasoning": [
+          11,
+          12
+        ],
+        "abstention": [
+          8,
+          10
+        ]
+      },
+      "mem0": {
+        "single-session-user": [
+          12,
+          12
+        ],
+        "single-session-assistant": [
+          9,
+          12
+        ],
+        "single-session-preference": [
+          11,
+          12
+        ],
+        "multi-session": [
+          9,
+          12
+        ],
+        "knowledge-update": [
+          7,
+          12
+        ],
+        "temporal-reasoning": [
+          6,
+          12
+        ],
+        "abstention": [
+          9,
+          10
+        ]
+      },
+      "chunk_rag": {
+        "single-session-user": [
+          10,
+          12
+        ],
+        "single-session-assistant": [
+          12,
+          12
+        ],
+        "single-session-preference": [
+          8,
+          12
+        ],
+        "multi-session": [
+          6,
+          12
+        ],
+        "knowledge-update": [
+          10,
+          12
+        ],
+        "temporal-reasoning": [
+          5,
+          12
+        ],
+        "abstention": [
+          9,
+          10
+        ]
+      },
+      "full_context": {
+        "single-session-user": [
+          6,
+          12
+        ],
+        "single-session-assistant": [
+          11,
+          12
+        ],
+        "single-session-preference": [
+          8,
+          12
+        ],
+        "multi-session": [
+          5,
+          12
+        ],
+        "knowledge-update": [
+          10,
+          12
+        ],
+        "temporal-reasoning": [
+          7,
+          12
+        ],
+        "abstention": [
+          9,
+          10
+        ]
+      }
+    },
+    "recall_ms": {
+      "v2_ranked": 650.0,
+      "v2_full": 631.0,
+      "mem0": 688.5,
+      "chunk_rag": 2908.0,
+      "full_context": 1.0
+    },
+    "evidence_recall": {
+      "v2_ranked": 0.890040650406504,
+      "v2_full": 0.9878048780487805,
+      "mem0": 0.9142276422764228,
+      "chunk_rag": 0.9101626016260164,
+      "full_context": 1.0
+    },
+    "paired": {
+      "v2_ranked_vs_mem0": {
+        "a_only": 12,
+        "b_only": 9,
+        "p": 0.6636
+      },
+      "v2_full_vs_mem0": {
+        "a_only": 12,
+        "b_only": 2,
+        "p": 0.0129
+      },
+      "v2_ranked_vs_v2_full": {
+        "a_only": 1,
+        "b_only": 8,
+        "p": 0.0391
+      },
+      "v2_ranked_vs_chunk_rag": {
+        "a_only": 14,
+        "b_only": 8,
+        "p": 0.2863
+      },
+      "v2_ranked_vs_full_context": {
+        "a_only": 16,
+        "b_only": 6,
+        "p": 0.0525
+      },
+      "v2_full_vs_chunk_rag": {
+        "a_only": 17,
+        "b_only": 4,
+        "p": 0.0072
+      },
+      "v2_full_vs_full_context": {
+        "a_only": 20,
+        "b_only": 3,
+        "p": 0.0005
+      },
+      "mem0_vs_chunk_rag": {
+        "a_only": 14,
+        "b_only": 11,
+        "p": 0.69
+      },
+      "mem0_vs_full_context": {
+        "a_only": 17,
+        "b_only": 10,
+        "p": 0.2478
+      }
+    }
+  },
+  "fig_beam": {
+    "common": 80,
+    "memx": {
+      "contradiction resolution": {
+        "mean": 0.6625,
+        "lo": 0.5813,
+        "hi": 0.7375,
+        "n": 40
+      },
+      "knowledge update": {
+        "mean": 0.5375,
+        "lo": 0.4,
+        "hi": 0.675,
+        "n": 40
+      },
+      "both": {
+        "mean": 0.6,
+        "lo": 0.5188,
+        "hi": 0.6829,
+        "n": 80
+      },
+      "tokens": 896.725
+    },
+    "mem0": {
+      "contradiction resolution": {
+        "mean": 0.5563,
+        "lo": 0.4781,
+        "hi": 0.6375,
+        "n": 40
+      },
+      "knowledge update": {
+        "mean": 0.5188,
+        "lo": 0.3875,
+        "hi": 0.6687,
+        "n": 40
+      },
+      "both": {
+        "mean": 0.5375,
+        "lo": 0.4547,
+        "hi": 0.6234,
+        "n": 80
+      },
+      "tokens": 1932.1625
+    },
+    "full_context": {
+      "contradiction resolution": {
+        "mean": 0.4656,
+        "lo": 0.3688,
+        "hi": 0.5625,
+        "n": 40
+      },
+      "knowledge update": {
+        "mean": 0.6125,
+        "lo": 0.4625,
+        "hi": 0.7625,
+        "n": 40
+      },
+      "both": {
+        "mean": 0.5391,
+        "lo": 0.4531,
+        "hi": 0.6266,
+        "n": 80
+      },
+      "tokens": 136688.45
+    },
+    "chunk_rag": {
+      "contradiction resolution": {
+        "mean": 0.4594,
+        "lo": 0.3812,
+        "hi": 0.5345,
+        "n": 40
+      },
+      "knowledge update": {
+        "mean": 0.4562,
+        "lo": 0.3063,
+        "hi": 0.6062,
+        "n": 40
+      },
+      "both": {
+        "mean": 0.4578,
+        "lo": 0.3734,
+        "hi": 0.5406,
+        "n": 80
+      },
+      "tokens": 3957.7875
+    },
+    "paired": {
+      "memx_vs_mem0": {
+        "wins": 29,
+        "losses": 15,
+        "p_sign": 0.0488,
+        "mean_diff": 0.0625,
+        "ci": [
+          -0.0172,
+          0.1407
+        ]
+      },
+      "memx_vs_full_context": {
+        "wins": 27,
+        "losses": 14,
+        "p_sign": 0.0596,
+        "mean_diff": 0.0609,
+        "ci": [
+          -0.0203,
+          0.1437
+        ]
+      },
+      "memx_vs_chunk_rag": {
+        "wins": 35,
+        "losses": 14,
+        "p_sign": 0.0038,
+        "mean_diff": 0.1422,
+        "ci": [
+          0.0421,
+          0.2469
+        ]
+      },
+      "mem0_vs_full_context": {
+        "wins": 23,
+        "losses": 22,
+        "p_sign": 1.0,
+        "mean_diff": -0.0016,
+        "ci": [
+          -0.0891,
+          0.0891
+        ]
+      }
+    }
+  },
+  "fig_zep": {
+    "smokefinal-lean": {
+      "label": "Memory-X ranked",
+      "k": 9,
+      "n": 10,
+      "tokens": 236.0,
+      "ingest_usd": 0.134593412
+    },
+    "smokefinal-lean_full": {
+      "label": "Memory-X full",
+      "k": 9,
+      "n": 10,
+      "tokens": 23989.4,
+      "ingest_usd": 0.134593412
+    },
+    "smoke55-mem0_top30": {
+      "label": "mem0 top-30",
+      "k": 8,
+      "n": 10,
+      "tokens": 1635.8,
+      "ingest_usd": 0.131
+    },
+    "zeppilot-zep_llm": {
+      "label": "Zep (LLM judge)",
+      "k": 5,
+      "n": 10,
+      "tokens": 2310.9,
+      "ingest_usd": 0.7112555555555556,
+      "llm_calls": 451.55555555555554
+    },
+    "zeppilot-zep_jev": {
+      "label": "Zep + Jev",
+      "k": 6,
+      "n": 10,
+      "tokens": 2369.0,
+      "ingest_usd": 0.6017185714285713,
+      "llm_calls": 152.71428571428572
+    },
+    "zep_same_question": {
+      "llm": {
+        "llm_calls": 532,
+        "llm_tokens_in": 6915222,
+        "llm_tokens_out": 148781,
+        "llm_usd_est": 0.76591,
+        "jev_requests": 0,
+        "jev_usd": 0.0
+      },
+      "jev": {
+        "llm_calls": 148,
+        "llm_tokens_in": 4387568,
+        "llm_tokens_out": 133598,
+        "llm_usd_est": 0.50556,
+        "jev_requests": 381,
+        "jev_usd": 0.09637
+      }
+    },
+    "zep_ingest_s": {
+      "llm": 791.4033333333333,
+      "jev": 680.9914285714285
+    }
+  },
+  "fig_calibration": {
+    "verdict": {
+      "n": 240,
+      "agree": 181,
+      "bins": [
+        {
+          "p": 0.461,
+          "agree": 0.533,
+          "n": 60
+        },
+        {
+          "p": 0.551,
+          "agree": 0.481,
+          "n": 27
+        },
+        {
+          "p": 0.642,
+          "agree": 0.697,
+          "n": 33
+        },
+        {
+          "p": 0.748,
+          "agree": 0.815,
+          "n": 27
+        },
+        {
+          "p": 0.842,
+          "agree": 1.0,
+          "n": 33
+        },
+        {
+          "p": 0.94,
+          "agree": 0.967,
+          "n": 60
+        }
+      ]
+    },
+    "destructive": {
+      "n": 196,
+      "agree": 108,
+      "bins": [
+        {
+          "p": 0.443,
+          "agree": 0.347,
+          "n": 49
+        },
+        {
+          "p": 0.543,
+          "agree": 0.452,
+          "n": 31
+        },
+        {
+          "p": 0.643,
+          "agree": 0.588,
+          "n": 17
+        },
+        {
+          "p": 0.738,
+          "agree": 0.414,
+          "n": 29
+        },
+        {
+          "p": 0.85,
+          "agree": 0.619,
+          "n": 21
+        },
+        {
+          "p": 0.949,
+          "agree": 0.857,
+          "n": 49
+        }
+      ]
+    },
+    "entity": {
+      "n": 154,
+      "agree": 120,
+      "bins": [
+        {
+          "p": 0.442,
+          "agree": 0.45,
+          "n": 20
+        },
+        {
+          "p": 0.536,
+          "agree": 0.56,
+          "n": 25
+        },
+        {
+          "p": 0.646,
+          "agree": 0.778,
+          "n": 27
+        },
+        {
+          "p": 0.736,
+          "agree": 0.929,
+          "n": 14
+        },
+        {
+          "p": 0.855,
+          "agree": 0.828,
+          "n": 29
+        },
+        {
+          "p": 0.966,
+          "agree": 1.0,
+          "n": 39
+        }
+      ]
+    },
+    "confusion": [
+      [
+        4.0,
+        0.0,
+        1.0,
+        6.0,
+        0.0
+      ],
+      [
+        3.0,
+        39.0,
+        0.0,
+        34.0,
+        4.0
+      ],
+      [
+        2.0,
+        3.0,
+        71.0,
+        44.0,
+        1.0
+      ],
+      [
+        1.0,
+        2.0,
+        0.0,
+        154.0,
+        15.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        31.0,
+        21.0
+      ]
+    ]
+  },
+  "costs": {
+    "memx_questions": 82,
+    "memx_usd_per_q": 1.1790379024390245,
+    "memx_tokens_in_per_q": 369762.9024390244,
+    "memx_jev_requests": {
+      "sort": 85014,
+      "auto": 26,
+      "entity": 17618,
+      "verdict": 310766
+    },
+    "memx_jev_requests_per_q": 5041.756097560976,
+    "mem0_usd_total": 59.23,
+    "mem0_questions_ingested": 164,
+    "mem0_usd_per_q": 0.361
+  },
+  "fig_efficiency": {
+    "LongMemEval (82)": {
+      "memx_tokens": 358.1951219512195,
+      "memx_score": 80.48780487804878,
+      "mem0_tokens": 1649.7560975609756,
+      "mem0_score": 76.82926829268293,
+      "ratio": 4.60574696990331
+    },
+    "BEAM (80)": {
+      "memx_tokens": 896.725,
+      "memx_score": 60.0,
+      "mem0_tokens": 1932.1625,
+      "mem0_score": 53.75,
+      "ratio": 2.154687892051632
+    },
+    "Zep set (10)": {
+      "memx_tokens": 236.0,
+      "memx_score": 90.0,
+      "mem0_tokens": 1635.8,
+      "mem0_score": 80.0,
+      "ratio": 6.93135593220339
+    },
+    "OrgProbe (17)": {
+      "memx_tokens": 124.76470588235294,
+      "memx_score": 92.15686274509802,
+      "mem0_tokens": 1076.1176470588234,
+      "mem0_score": 94.11764705882354,
+      "ratio": 8.625176803394623
+    }
+  }
+}
