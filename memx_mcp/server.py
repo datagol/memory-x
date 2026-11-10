@@ -294,8 +294,8 @@ async def list_scopes(prefix: Annotated[str | None, Field(description="Only scop
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,
                                       openWorldHint=False))
 async def forget_fact(fact_id: Annotated[str, Field(description="The id of the fact to delete")]) -> dict[str, Any]:
-    """Permanently delete one fact (for example when the user asks you to forget something). The deletion is logged
-    without its content. Use only when the user asked; to correct a fact, remember the new value instead."""
+    """Delete one fact (for example when the user asks you to forget something). It leaves recall at once; the row is
+    kept as 'deleted' for history. Use only when the user asked; to correct a fact, remember the new value instead."""
     mem = await memory()
     report = await _call(mem.forget, fact_id=_uuid(fact_id), requested_by="mcp")
     return {"facts_removed": report.facts_removed}

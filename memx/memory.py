@@ -23,8 +23,11 @@ from memx.jobs import queue
 from memx.jobs.runner import JobRunner
 from memx.logs import event, exception, log_context
 from memx.pipeline.commit import verdict_decisions
+from memx.pipeline.entities import normalize as normalize_entity
+from memx.pipeline.entities import tenant_of as entity_tenant
 from memx.pipeline.ingest_job import run_ingest
 from memx.pipeline.reconcile import judge_neighbors, plan_from
+from memx.pipeline.similarity import text_hash
 from memx.providers.embedder import Embedder, OpenRouterEmbedder
 from memx.providers.extractor import Extractor, OpenRouterExtractor
 from memx.providers.http import OpenRouterHTTP
@@ -32,6 +35,7 @@ from memx.providers.jev import JevClient, Judge
 from memx.recall.engine import recall as _recall
 from memx.recall.render import render as _render
 from memx.scopes import ScopePath
+from memx.tokens import estimate_tokens
 
 log = logging.getLogger("memx.memory")
 from memx.types import (
@@ -47,6 +51,7 @@ from memx.types import (
     Messages,
     Recall,
     RecallMode,
+    TOPIC_DEFINITIONS,
     SweepReport,
     Text,
     Turn,
@@ -61,6 +66,10 @@ class InputTooLarge(ValueError):
 
 class NotFound(LookupError):
     pass
+
+
+class Conflict(ValueError):
+    """The change clashes with the fact's state or with another fact (for example the same text is already active)."""
 
 
 def _input_chars(inp: Messages | Text) -> int:
@@ -387,13 +396,78 @@ class Memory:
                     scope = str(ScopePath.parse(scope))
                     facts, ingests, scopes = await repo.forget_scope(conn, scope, descendants)
                 else:
-                    facts, ingests, scopes = await repo.forget_fact(conn, fact_id), 0, 0
+                    facts, ingests, scopes = await repo.forget_fact(conn, fact_id, requested_by), 0, 0
                 await repo.log_forget(conn, scope=scope, fact_id=fact_id, descendants=descendants, facts=facts,
                                       ingests=ingests, requested_by=requested_by)
         event(log, "forget", scope=scope, fact_id=str(fact_id) if fact_id else None,
               descendants=descendants if scope else None, facts_removed=facts, ingests_removed=ingests,
               scopes_removed=scopes, requested_by=requested_by)
         return ForgetReport(facts_removed=facts, ingests_removed=ingests, scopes_removed=scopes)
+
+    async def edit_fact(self, fact_id: UUID, *, text: str | None = None, category: Category | str | None = None,
+                        topic: str | None = None, set_topic: bool = False,
+                        add_entities: list[dict[str, str]] | None = None,
+                        remove_entity_ids: list[UUID] | None = None, changed_by: str | None = None) -> Fact:
+        """Correct an active fact. A new text makes a new version that supersedes this one (history keeps both);
+        category, topic and entity changes apply in place. `set_topic` with `topic=None` clears the topic."""
+        cfg = self.ctx.config
+        if category is not None:
+            category = Category(category)
+        if set_topic and topic is not None and topic not in TOPIC_DEFINITIONS:
+            raise ValueError(f"unknown topic {topic!r}")
+        if text is not None:
+            text = text.strip()
+            if not text:
+                raise ValueError("the text is empty")
+            if len(text) > cfg.max_fact_chars:
+                raise ValueError(f"the text is over {cfg.max_fact_chars} characters")
+        async with self.ctx.pool.connection() as conn:
+            fact = await repo.get_fact(conn, fact_id)
+            if fact is None:
+                raise NotFound(f"fact {fact_id} not found")
+            if fact.status != "active":
+                raise Conflict(f"only active facts can be edited; this one is {fact.status}")
+            new_text = text if text is not None and text != fact.text else None
+            embedding = (await self.ctx.embedder.embed([new_text]))[0] if new_text else None
+            values: dict[str, Any] = {}
+            if category is not None and category.value != fact.category:
+                values["category"] = category.value
+            if set_topic and topic != fact.topic:
+                values |= {"topic": topic, "topic_confidence": 1.0 if topic else None}
+            edit = {"edited_by": changed_by, "edited_at": datetime.now(UTC).isoformat()}
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (fact.scope,))
+                target = fact_id
+                if new_text:
+                    values |= {"text": new_text, "text_hash": text_hash(new_text),
+                               "token_count": estimate_tokens(new_text, cfg.chars_per_token) + 2,
+                               "embedding": embedding, "embedding_model": self.ctx.embedder.model,
+                               "observed_at": datetime.now(UTC), "attrs": {**edit, "edited_from": str(fact_id)}}
+                    if await repo.find_exact(conn, [fact.scope], values["text_hash"]):
+                        raise Conflict("an active fact in this scope already states this text")
+                    await conn.execute(
+                        "UPDATE memx_fact SET status = 'superseded', superseded_at = now() WHERE id = %s", (fact_id,))
+                    target = await repo.copy_fact(conn, fact_id, values)
+                    await conn.execute("UPDATE memx_fact SET superseded_by = %s WHERE id = %s", (target, fact_id))
+                elif values or add_entities or remove_entity_ids:
+                    await repo.reclassify_fact(conn, fact_id, {**values, "attrs": edit})
+                if remove_entity_ids:
+                    await repo.unlink_entities(conn, target, list(remove_entity_ids))
+                tenant = entity_tenant(fact.scope)
+                for mention in add_entities or []:
+                    name = mention["name"].strip()
+                    norm = normalize_entity(name)
+                    if not name or not norm:
+                        continue
+                    entity_id = await repo.upsert_entity(conn, tenant, name, norm, mention.get("type") or "other")
+                    await repo.link_entity(conn, target, entity_id, name)
+            edited = await repo.get_fact(conn, target)
+            await repo.attach_entities(conn, [edited])
+        event(log, "fact.edited", fact_id=str(fact_id), new_fact_id=str(target) if target != fact_id else None,
+              scope=fact.scope, changed=sorted(k for k in values if k != "attrs"),
+              entities_added=len(add_entities or []), entities_removed=len(remove_entity_ids or []),
+              changed_by=changed_by)
+        return edited
 
     async def promote(self, fact_id: UUID, to_scope: str) -> Fact:
         """Copy a fact to a broader scope, reconciling it there; the original is superseded by the copy."""

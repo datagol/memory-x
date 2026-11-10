@@ -17,7 +17,7 @@ FACT_COLS = """
   f.id, f.scope::text AS scope, f.category, f.text, f.status, f.superseded_by, f.superseded_at,
   f.speaker, f.source, f.trust, f.sort_confidence, f.observed_at, f.event_at, f.stale_after,
   f.reinforced_count, f.last_reinforced_at, f.access_count, f.last_accessed_at, f.flags,
-  f.ingest_id, f.created_at, f.token_count, f.topic, f.topic_confidence
+  f.ingest_id, f.created_at, f.token_count, f.topic, f.topic_confidence, f.deleted_at, f.deleted_by
 """
 
 # Extra columns reconcile needs: the extractor's attribute label and the window a fact came from.
@@ -954,14 +954,58 @@ async def forget_scope(conn: AsyncConnection, scope: str, descendants: bool) -> 
     return len(fact_ids), len(ingest_ids), scopes_removed
 
 
-async def forget_fact(conn: AsyncConnection, fact_id: UUID) -> int:
-    await conn.execute(
-        "DELETE FROM memx_decision WHERE subject_fact_id = %s OR object_fact_id = %s", (fact_id, fact_id)
+async def forget_fact(conn: AsyncConnection, fact_id: UUID, requested_by: str | None = None) -> int:
+    """Soft delete: the row stays as 'deleted' for history; recall and listings skip it."""
+    cur = await conn.execute(
+        """
+        UPDATE memx_fact SET status = 'deleted', deleted_at = now(), deleted_by = %s
+         WHERE id = %s AND status <> 'deleted'
+        RETURNING id
+        """,
+        (requested_by, fact_id),
     )
-    cur = await conn.execute("DELETE FROM memx_fact WHERE id = %s RETURNING id", (fact_id,))
-    removed = len(await cur.fetchall())
+    return len(await cur.fetchall())
+
+
+async def copy_fact(conn: AsyncConnection, fact_id: UUID, values: dict[str, Any]) -> UUID:
+    """A new active version of a fact: its row with `values` replacing columns, and the same entity links."""
+    sets = {k: v for k, v in values.items() if k != "attrs"}
+    cols = ["scope", "category", "text", "text_hash", "token_count", "embedding", "embedding_model", "ingest_id",
+            "speaker", "source", "trust", "extract_confidence", "sort_confidence", "sort_probs", "flags",
+            "observed_at", "event_at", "stale_after", "topic", "topic_confidence"]
+    select = ", ".join(
+        ("%s::vector" if c == "embedding" else "%s") if c in sets else c for c in cols
+    )
+    params = [Vector(sets[c]) if c == "embedding" else sets[c] for c in cols if c in sets]
+    cur = await conn.execute(
+        f"""
+        INSERT INTO memx_fact ({", ".join(cols)}, status, attrs)
+        SELECT {select}, 'active', attrs || %s FROM memx_fact WHERE id = %s
+        RETURNING id
+        """,
+        [*params, Jsonb(values.get("attrs") or {}), fact_id],
+    )
+    new_id = (await cur.fetchone())["id"]
+    await conn.execute(
+        "INSERT INTO memx_fact_entity (fact_id, entity_id, surface) "
+        "SELECT %s, entity_id, surface FROM memx_fact_entity WHERE fact_id = %s ON CONFLICT DO NOTHING",
+        (new_id, fact_id),
+    )
+    return new_id
+
+
+async def reclassify_fact(conn: AsyncConnection, fact_id: UUID, values: dict[str, Any]) -> None:
+    """Change classification columns (category, topic, attrs) in place; the text is not touched."""
+    sets = {k: v for k, v in values.items() if k != "attrs"}
+    assignments = [f"{c} = %s" for c in sets] + ["attrs = attrs || %s"]
+    await conn.execute(f"UPDATE memx_fact SET {', '.join(assignments)} WHERE id = %s",
+                       [*sets.values(), Jsonb(values.get("attrs") or {}), fact_id])
+
+
+async def unlink_entities(conn: AsyncConnection, fact_id: UUID, entity_ids: list[UUID]) -> None:
+    await conn.execute("DELETE FROM memx_fact_entity WHERE fact_id = %s AND entity_id = ANY(%s)",
+                       (fact_id, entity_ids))
     await prune_entities(conn)
-    return removed
 
 
 async def log_forget(

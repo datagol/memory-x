@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
+from memx import Conflict, InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
 from memx.config import InsertMode
 from memx.documents import DocumentError, read_document
 from memx.providers.http import ProviderError
@@ -113,6 +113,11 @@ v1 = [Depends(require_token)]
 @app.exception_handler(NotFound)
 async def _not_found(_: Request, exc: NotFound) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(Conflict)
+async def _conflict(_: Request, exc: Conflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.exception_handler(InvalidScope)
@@ -243,6 +248,41 @@ async def history(fact_id: UUID, mem: Mem) -> FactHistory:
     return await mem.history(fact_id)
 
 
+class EntityRefBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    type: str = "other"
+
+
+class FactEditBody(BaseModel):
+    """A correction to one active fact. Send only what changes; `topic: null` clears the topic."""
+
+    text: str | None = Field(default=None, min_length=1)
+    category: Category | None = None
+    topic: str | None = None
+    add_entities: list[EntityRefBody] = Field(default_factory=list, max_length=20)
+    remove_entity_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    changed_by: str | None = Field(default=None, max_length=200)
+
+
+@app.patch("/v1/facts/{fact_id}", response_model=Fact, dependencies=v1)
+async def edit_fact(fact_id: UUID, body: FactEditBody, mem: Mem,
+                    x_requested_by: Annotated[str | None, Header()] = None) -> Fact:
+    """A new `text` makes a new version that supersedes this fact; the response is that version. Other fields
+    change in place."""
+    if not ({"text", "category", "topic"} & body.model_fields_set or body.add_entities or body.remove_entity_ids):
+        raise HTTPException(status_code=422, detail="nothing to change")
+    try:
+        return await mem.edit_fact(
+            fact_id, text=body.text, category=body.category, topic=body.topic,
+            set_topic="topic" in body.model_fields_set,
+            add_entities=[e.model_dump() for e in body.add_entities], remove_entity_ids=body.remove_entity_ids,
+            changed_by=body.changed_by or x_requested_by)
+    except Conflict:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 class PromoteBody(BaseModel):
     to_scope: str
 
@@ -263,6 +303,7 @@ async def forget_scope(scope: str, mem: Mem, descendants: bool = True,
 
 @app.delete("/v1/facts/{fact_id}", response_model=ForgetReport, dependencies=v1)
 async def forget_fact(fact_id: UUID, mem: Mem, x_requested_by: Annotated[str | None, Header()] = None) -> ForgetReport:
+    """Soft delete: the fact is kept as 'deleted' (with who and when) and leaves recall and listings."""
     report = await mem.forget(fact_id=fact_id, requested_by=x_requested_by)
     if report.facts_removed == 0:
         raise NotFound(f"fact {fact_id} not found")
