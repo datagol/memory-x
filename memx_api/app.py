@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from memx.config import InsertMode
 from memx.documents import DocumentError, read_document
 from memx.providers.http import ProviderError
 from memx.types import Category, Fact, FactHistory, ForgetReport, IngestInput, InsertReceipt, Recall, RecallMode, Turn
+from memx import logs
 from memx.banner import announce_when_ready, quiet_health_checks
 from memx_api import dashboard
 
@@ -29,8 +31,20 @@ quiet_health_checks()
 STATIC = Path(__file__).parent / "static"
 
 
+log = logging.getLogger("memx.api")
+
+
+def _startup_summary(cfg: MemxConfig) -> dict[str, Any]:
+    """What this process runs with, for the first log line. Never secrets: only whether they are set."""
+    return {"version": app.version, "providers": cfg.providers, "insert_mode": cfg.insert_mode,
+            "extractor_model": cfg.extractor_model, "embedding_model": cfg.embedding_model, "jev_model": cfg.jev_model,
+            "openrouter_key": "set" if cfg.has_api_key() else "missing",
+            "auth": "on" if cfg.api_token and cfg.api_token.get_secret_value() else "off"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logs.configure()
     # Under compose, print where everything is once the API and the MCP server answer (see memx.banner).
     announcer = None
     if os.environ.get("MEMX_BANNER"):
@@ -48,7 +62,10 @@ async def lifespan(app: FastAPI):
 async def _memory_lifespan(app: FastAPI):
     cfg = MemxConfig()
     app.state.config, app.state.startup_error, app.state.memory = cfg, None, None
+    logs.event(log, "api.started", **_startup_summary(cfg))
     if cfg.providers != "demo" and not cfg.has_api_key():
+        logs.event(log, "api.no_key", logging.WARNING,
+                   detail="OPENROUTER_API_KEY is not set: every memory call will answer 503 until it is")
         # Start anyway, so the dashboard can say what is missing instead of the container restarting in a loop.
         app.state.startup_error = (
             "OPENROUTER_API_KEY is not set. Add it to .env (copy .env.example), then run `docker compose up -d`. "
@@ -68,6 +85,7 @@ async def _memory_lifespan(app: FastAPI):
 
 
 app = FastAPI(title="memx", version="0.1.0", lifespan=lifespan)
+app.add_middleware(logs.RequestLogMiddleware, service="api")
 
 
 def memory(request: Request) -> Memory:

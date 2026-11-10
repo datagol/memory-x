@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 
 from mcp.server.transport_security import TransportSecuritySettings
@@ -15,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from memx import MemxConfig
+from memx import MemxConfig, logs
 from memx.banner import quiet_health_checks
 from memx_mcp.server import close, mcp
 
@@ -51,6 +52,8 @@ class BearerAuth:
         if scope["type"] == "http" and self.expected and scope["path"].startswith("/mcp"):
             given = dict(scope["headers"]).get(b"authorization", b"")
             if not hmac.compare_digest(given, self.expected):
+                logs.event(logging.getLogger("memx.mcp"), "mcp.auth_rejected", logging.WARNING,
+                           reason="missing token" if not given else "wrong token")
                 body = json.dumps({"error": "missing or invalid bearer token (MEMX_API_TOKEN)"}).encode()
                 await send({"type": "http.response.start", "status": 401, "headers": [
                     (b"content-type", b"application/json"), (b"www-authenticate", b"Bearer")]})
@@ -71,11 +74,15 @@ class BearerAuth:
 
 
 def build() -> ASGIApp:
+    logs.configure()
     cfg = MemxConfig()
+    logs.event(logging.getLogger("memx.mcp"), "mcp.started", auth="on" if cfg.api_token and
+               cfg.api_token.get_secret_value() else "off", openrouter_key="set" if cfg.has_api_key() else "missing",
+               default_scope=os.environ.get("MEMX_MCP_SCOPE", "memory.default"))
     token = cfg.api_token.get_secret_value() if cfg.api_token and cfg.api_token.get_secret_value() else None
     inner = mcp.streamable_http_app(stateless_http=True, json_response=True, host="0.0.0.0",
                                     transport_security=_security())
-    return BearerAuth(inner, token)
+    return logs.RequestLogMiddleware(BearerAuth(inner, token), service="mcp")
 
 
 app = build()

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
 from typing import Any
 from uuid import UUID
@@ -11,6 +13,7 @@ from memx import scope_settings
 from memx import usage as usage_tracker
 from memx.context import Context
 from memx.db import repo
+from memx.logs import event, log_context
 from memx.pipeline.commit import commit_candidate, db_now, reject_candidate
 from memx.pipeline.entities import EntityPlan, is_generic, normalize, plan_entities
 from memx.pipeline.extract import ensure_candidates
@@ -18,6 +21,8 @@ from memx.pipeline.reconcile import Plan, judge_neighbors, plan_from
 from memx.pipeline.sort import SortResult, sort_candidate
 from memx.scopes import ScopePath
 from memx.types import Candidate
+
+log = logging.getLogger("memx.ingest")
 
 
 def build_receipt(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -95,9 +100,23 @@ async def run_ingest(ctx: Context, ingest_id: UUID, *, allow_batch: bool = True)
     if ingest["status"] == "committed":
         return ingest["receipt"]
 
-    with usage_tracker.track() as usage:
+    with log_context(ingest_id=str(ingest_id), scope=str(ingest["scope"])), usage_tracker.track() as usage:
+        event(log, "ingest.started", kind=ingest.get("kind"), mode=ingest.get("mode"), status=ingest["status"],
+              payload_chars=len(json.dumps(ingest.get("payload") or {})))
         usage.merge((ingest.get("extract_batch") or {}).get("usage"))  # counted before a batch wait
-        return await _run_tracked(ctx, ingest, usage, allow_batch)
+        receipt = await _run_tracked(ctx, ingest, usage, allow_batch)
+        if receipt is not None:
+            timings, spent = receipt.get("timings", {}), receipt.get("usage", {})
+            event(log, "ingest.committed",
+                  **{k: receipt.get(k) for k in ("added", "dropped", "historical", "superseded", "shadowed",
+                                                 "rejected", "held_back")},
+                  ms=timings.get("total_ms"), extract_ms=timings.get("extract_ms"), sort_ms=timings.get("sort_ms"),
+                  reconcile_ms=timings.get("reconcile_commit_ms"),
+                  tokens_in=spent.get("extract_tokens_in"), tokens_out=spent.get("extract_tokens_out"),
+                  jev_requests=spent.get("jev_requests"), jev_cost_usd=spent.get("jev_cost_usd"))
+        else:
+            event(log, "ingest.vanished", logging.WARNING, detail="deleted while it was being processed")
+        return receipt
 
 
 async def _run_tracked(ctx: Context, ingest: dict[str, Any], usage: usage_tracker.Usage,

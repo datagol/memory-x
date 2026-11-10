@@ -11,7 +11,9 @@ check passes) without an OpenRouter key; tools then answer with the same instruc
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -23,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
 from memx.db import repo
+from memx.logs import event
 from memx.providers.http import ProviderError
 from memx.types import Category, Fact, InsertReceipt, Messages, Text, Turn
 
@@ -43,7 +46,39 @@ INSTRUCTIONS = f"""memx is long-term memory for this conversation's user, shared
   running, check later with `ingest_status`.
 """
 
-mcp = MCPServer(name="memx", title="memx memory", instructions=INSTRUCTIONS, version="0.1.0")
+log = logging.getLogger("memx.mcp")
+
+
+async def _log_tool_calls(ctx: Any, call_next: Any) -> Any:
+    """One `mcp.tool` line per tool call: the tool, its scope, how long it took and whether it failed.
+    Arguments other than the scope (what was said, the query) are not logged."""
+    if getattr(ctx, "method", None) != "tools/call":
+        return await call_next(ctx)
+    params = ctx.params if isinstance(ctx.params, dict) else getattr(ctx.params, "model_dump", lambda: {})()
+    args = params.get("arguments") or {}
+    tool, scope = params.get("name"), args.get("scope") or (DEFAULT_SCOPE if "scope" in _SCOPED else None)
+    started = time.perf_counter()
+    try:
+        result = await call_next(ctx)
+    except Exception as exc:
+        event(log, "mcp.tool", logging.ERROR, tool=tool, scope=scope, ok=False,
+              error=f"{type(exc).__name__}: {str(exc)[:300]}", ms=int((time.perf_counter() - started) * 1000))
+        raise
+    data = result if isinstance(result, dict) else getattr(result, "model_dump", lambda **_: {})(by_alias=True)
+    failed = bool(data.get("isError") or data.get("is_error"))
+    detail = None
+    if failed:
+        content = data.get("content") or [{}]
+        detail = str(content[0].get("text", ""))[:300] if isinstance(content[0], dict) else None
+    event(log, "mcp.tool", logging.WARNING if failed else logging.INFO, tool=tool, scope=scope, ok=not failed,
+          error=detail, ms=int((time.perf_counter() - started) * 1000))
+    return result
+
+
+_SCOPED = {"recall", "remember", "remember_conversation", "remember_document", "list_facts"}
+
+mcp = MCPServer(name="memx", title="memx memory", instructions=INSTRUCTIONS, version="0.1.0",
+                middleware=[_log_tool_calls])
 
 
 # ---- connection ----------------------------------------------------------------------------------------------------

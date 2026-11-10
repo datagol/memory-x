@@ -156,6 +156,10 @@ class MemxConfig(BaseSettings):
     # API
     api_token: SecretStr | None = None
 
+    # Logs (read by memx.logs.configure in the API, worker, MCP server and CLI)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"  # DEBUG adds memory text and queries
+    log_format: Literal["text", "json"] = "text"
+
     def has_api_key(self) -> bool:
         return bool(self.openrouter_api_key and self.openrouter_api_key.get_secret_value().strip())
 

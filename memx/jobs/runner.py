@@ -16,11 +16,16 @@ import psycopg
 from pydantic import ValidationError
 
 from memx.context import Context
+from memx.logs import event, exception, log_context
 from memx.db import repo
 from memx.jobs import queue
 from memx.providers.http import ProviderError
 
 log = logging.getLogger("memx.jobs")
+
+
+def loop_time() -> float:
+    return asyncio.get_running_loop().time()
 
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -72,7 +77,7 @@ class JobRunner:
                 async with self.ctx.pool.connection() as conn:
                     job = await queue.claim(conn, f"{self.worker_id}/{n}")
             except Exception:  # database blip: back off and retry
-                log.exception("claim failed")
+                exception(log, "job.claim_failed")
                 await self._sleep(5)
                 continue
             if job is None:
@@ -81,7 +86,14 @@ class JobRunner:
             await self.run_job(job)
 
     async def run_job(self, job: dict[str, Any]) -> None:
+        payload = job.get("payload") or {}
+        with log_context(job_id=job["id"], job_kind=job["kind"], ingest_id=payload.get("ingest_id")):
+            await self._run_job(job)
+
+    async def _run_job(self, job: dict[str, Any]) -> None:
         handler = self.handlers.get(job["kind"])
+        started = loop_time()
+        event(log, "job.started", logging.DEBUG, attempt=job.get("attempts"))
         try:
             if handler is None:
                 raise ValueError(f"no handler for job kind {job['kind']!r}")
@@ -91,19 +103,25 @@ class JobRunner:
         except queue.Deferred as wait:
             async with self.ctx.pool.connection() as conn:
                 await queue.defer(conn, job["id"], wait.seconds)
+            event(log, "job.deferred", reason=str(wait),
+                  retry_in_s=wait.seconds)
             return
         except Exception as exc:  # noqa: BLE001
             retryable = exc.retryable if isinstance(exc, ProviderError) else not isinstance(
                 exc, (ValidationError, ValueError, TypeError, KeyError))
             message = f"{type(exc).__name__}: {exc}"
-            log.warning("job %s (%s) failed: %s", job["id"], job["kind"], message)
             async with self.ctx.pool.connection() as conn:
                 dead = await queue.fail(conn, job, message, retryable=retryable)
                 if job["kind"] == "ingest" and job["payload"].get("ingest_id"):
                     await repo.fail_ingest(conn, UUID(job["payload"]["ingest_id"]), message, final=dead)
+            # A job that will be retried is a warning; one that gave up (dead letter) needs a person.
+            event(log, "job.dead" if dead else "job.failed", logging.ERROR if dead else logging.WARNING,
+                  error=message[:500], retryable=retryable, attempt=job.get("attempts"),
+                  ms=int((loop_time() - started) * 1000))
             return
         async with self.ctx.pool.connection() as conn:
             await queue.complete(conn, job["id"])
+        event(log, "job.done", logging.DEBUG, ms=int((loop_time() - started) * 1000))
 
     async def _listen(self) -> None:
         while not self._stop.is_set():
@@ -126,7 +144,7 @@ class JobRunner:
                 async with self.ctx.pool.connection() as conn:
                     requeued = await queue.reap(conn)
                     if requeued:
-                        log.info("requeued %d jobs with expired leases", requeued)
+                        event(log, "job.requeued", logging.WARNING, jobs=requeued, reason="lease expired")
                         self._wake.set()
                     if self.schedule_sweep and "sweep" in self.handlers:
                         bucket = datetime.now(UTC).strftime("%Y%m%d%H")
@@ -134,6 +152,6 @@ class JobRunner:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
-                log.exception("maintenance failed")
+                exception(log, "job.maintenance_failed")
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self.maintenance_seconds)

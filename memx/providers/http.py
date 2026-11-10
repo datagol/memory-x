@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import ssl
+import time
 from typing import Any
 
 import httpx
+
+from memx.logs import event
+
+log = logging.getLogger("memx.providers")
 
 
 class ProviderError(Exception):
@@ -40,7 +46,12 @@ class OpenRouterHTTP:
 
     async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         last: ProviderError | None = None
+        started = time.perf_counter()
+        model = body.get("model")
         for attempt in range(self._attempts):
+            if last is not None:
+                event(log, "provider.retry", logging.WARNING, path=path, model=model, attempt=attempt + 1,
+                      status=last.status, error=str(last)[:300])
             try:
                 resp = await self._client.post(path, json=body)
             except (httpx.HTTPError, ssl.SSLError) as exc:  # TLS record errors can escape httpx under load
@@ -55,10 +66,13 @@ class OpenRouterHTTP:
                         retryable=True, status=resp.status_code,
                     )
                 elif resp.status_code >= 400:
-                    raise ProviderError(
+                    rejected = ProviderError(
                         f"{path}: HTTP {resp.status_code}: {resp.text[:500]}",
                         retryable=False, status=resp.status_code,
                     )
+                    event(log, "provider.rejected", logging.ERROR, path=path, model=model, status=resp.status_code,
+                          error=str(rejected)[:300])
+                    raise rejected
                 else:
                     try:
                         data = resp.json()
@@ -73,12 +87,18 @@ class OpenRouterHTTP:
                         retryable = isinstance(code, int) and (code == 429 or code >= 500)
                         last = ProviderError(f"{path}: {err}", retryable=retryable, status=code)
                         if not retryable:
+                            event(log, "provider.rejected", logging.ERROR, path=path, model=model, status=code,
+                                  error=str(last)[:300])
                             raise last
                     else:
+                        event(log, "provider.call", logging.DEBUG, path=path, model=model, attempts=attempt + 1,
+                              ms=int((time.perf_counter() - started) * 1000))
                         return data
             if attempt < self._attempts - 1:
                 await asyncio.sleep(0.5 * 2**attempt + random.random() * 0.25)
         assert last is not None
+        event(log, "provider.failed", logging.ERROR, path=path, model=model, attempts=self._attempts,
+              status=last.status, error=str(last)[:300], ms=int((time.perf_counter() - started) * 1000))
         raise last
 
     async def get(self, path: str) -> dict[str, Any]:

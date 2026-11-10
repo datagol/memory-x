@@ -6,6 +6,7 @@ or cut). It is stored in ``memx_recall_log.explain`` and returned when ``explain
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from typing import Any
 from memx import scope_settings
 from memx.context import Context
 from memx.db import repo
+from memx.logs import event
 from memx.recall.decay import access_factor, final_score, freshness, priority
 from memx.recall.grade import GRADE_VERSION, grade
 from memx.recall.render import render
@@ -21,6 +23,8 @@ from memx.recall.walk import Reached, walk
 from memx.scopes import ScopePath
 from memx.tokens import estimate_tokens
 from memx.types import Category, Fact, PathStep, Recall, RecallMode, ScoredFact, Turn
+
+log = logging.getLogger("memx.recall")
 
 # Title line plus a header for every possible section.
 RENDER_OVERHEAD_TOKENS = 48
@@ -297,5 +301,10 @@ async def recall(
                 scores={str(f.id): round(f.score, 4) for f in picked}, token_count=token_count,
                 latency_ms=timings["total_ms"], explain=explanation,
             )
+    event(log, "recall", recall_id=str(recall_id), scope=scope, mode=mode, facts=len(picked),
+          candidates=len(candidates) if mode == "ranked" else None, tokens=token_count, budget=budget,
+          truncated=truncated or None, query_chars=len(query) if query else 0, ms=timings["total_ms"],
+          **{f"{k}": v for k, v in timings.items() if k != "total_ms"})
+    event(log, "recall.query", logging.DEBUG, recall_id=str(recall_id), query=query)
     return Recall(recall_id=recall_id, scope=scope, mode=mode, truncated=truncated, markdown=markdown,
                   facts=picked, token_count=token_count, explain=explanation if explain else None)

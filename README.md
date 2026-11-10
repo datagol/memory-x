@@ -26,6 +26,7 @@ recall ─► budget gate ─► whole memory
 - [Configuration](#configuration)
 - [Data model](#data-model)
 - [Audit, privacy and safety](#audit-privacy-and-safety)
+- [Logs](#logs)
 - [Deployment](#deployment)
 - [Tests](#tests)
 - [Evaluation](#evaluation)
@@ -434,6 +435,8 @@ Every field of `memx/config.py` can be set as an environment variable `MEMX_<FIE
 | `MEMX_EMBEDDING_MODEL` / `MEMX_EMBEDDING_DIM` | `openai/text-embedding-3-small` / `1536` | The dimension is fixed by the first migration; change it only on a fresh database |
 | `MEMX_JEV_MODEL` | `jev-1.14` | Judge model |
 | `MEMX_API_TOKEN` | | Bearer token for the API; unset means no auth |
+| `MEMX_LOG_LEVEL` | `INFO` | `DEBUG` adds memory text and queries; see [Logs](#logs) |
+| `MEMX_LOG_FORMAT` | `text` | `json` for one JSON object per line |
 
 ### Insert
 
@@ -515,6 +518,35 @@ Indexes: HNSW on embeddings, GIN on the full-text vector, GiST on scope paths, a
 - **Forget is complete.** Deleting a scope removes its raw inputs, facts, links, entity mentions, decisions and recall logs in one transaction, then removes entities no longer named anywhere. The forget log keeps counts and who asked, never content.
 - **User text never reaches Jev as instructions.** It always sits under an `untrusted` key in the judge's input, with a note to ignore directives inside it, and never appears in question wording or option labels.
 - **Tenants never share entities**, and recall only ever considers facts visible to the asking scope, including during the walk.
+
+## Logs
+
+The API, worker, MCP server and CLI write one line per event to standard output, so `docker compose logs -f api worker mcp` (or your log collector) shows everything. Set `MEMX_LOG_FORMAT=json` for one JSON object per line; the default is readable text:
+
+```
+2026-11-09 17:37:25,757 INFO    memx.ingest  ingest.committed  request_id=gw-42 ingest_id=3f8f… scope=memory.acme.alex added=3 dropped=1 superseded=1 ms=4210 extract_ms=2380 jev_requests=7 jev_cost_usd=0.0012
+```
+
+Every line carries the ids that tie it to its cause. An API or MCP call gets a request id: the caller's `X-Request-ID` when it sends one, otherwise a new one, returned in the response header. Every line the call causes carries it, including the insert it runs inline. Work done by the worker carries the job id and ingest id instead.
+
+| Event | Level | Fields |
+|---|---|---|
+| `api.started`, `mcp.started`, `worker.started` | INFO | models, insert mode, whether the OpenRouter key and auth token are set (never their values) |
+| `http.request` | INFO, ERROR for 5xx | method, path, status, ms (health checks are not logged; dashboard files only at DEBUG) |
+| `ingest.received`, `ingest.duplicate` | INFO | ingest id, scope, kind, mode, characters |
+| `ingest.started` / `ingest.committed` | INFO | added, dropped, replaced, held back, rejected; time per step; extraction tokens; Jev requests and cost |
+| `ingest.failed` | ERROR | the error, with a traceback (inline inserts) |
+| `recall` | INFO | recall id, scope, mode, facts, candidates, tokens, budget, query length, time per step |
+| `forget`, `fact.promoted`, `scope_settings.changed` | INFO | what was removed, moved or changed, and who asked |
+| `job.failed` / `job.dead` | WARNING / ERROR | job id, ingest id, error, whether it will be retried |
+| `job.deferred`, `job.requeued` | INFO / WARNING | waiting on a provider batch; jobs requeued after a lease expired |
+| `provider.retry`, `provider.rejected`, `provider.failed` | WARNING / ERROR | API path, model, status, attempt (never the key or the request body) |
+| `mcp.tool` | INFO, WARNING when the tool fails | tool, scope, ok, ms |
+| `mcp.auth_rejected` | WARNING | missing or wrong token |
+
+INFO never contains memory text, queries, documents, the OpenRouter key or the API token. `MEMX_LOG_LEVEL=DEBUG` adds the query of each recall, a line per model call with its duration, and the HTTP libraries' own lines; use it for local troubleshooting, not in production. The database keeps the full audit trail separately (decisions, recall log, forget log; see [Audit](#audit-privacy-and-safety)).
+
+As a library, memx only creates loggers under `memx.*` and prints nothing until the host application configures logging; call `memx.logs.configure()` to get the same output.
 
 ## Deployment
 

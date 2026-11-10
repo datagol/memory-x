@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, BinaryIO
 from uuid import UUID
@@ -20,6 +21,7 @@ from memx.db.pool import open_pool
 from memx.export.okf import build_bundle
 from memx.jobs import queue
 from memx.jobs.runner import JobRunner
+from memx.logs import event, exception, log_context
 from memx.pipeline.commit import verdict_decisions
 from memx.pipeline.ingest_job import run_ingest
 from memx.pipeline.reconcile import judge_neighbors, plan_from
@@ -30,6 +32,8 @@ from memx.providers.jev import JevClient, Judge
 from memx.recall.engine import recall as _recall
 from memx.recall.render import render as _render
 from memx.scopes import ScopePath
+
+log = logging.getLogger("memx.memory")
 from memx.types import (
     Candidate,
     Category,
@@ -174,11 +178,16 @@ class Memory:
                 elif await repo.reopen_failed_ingest(conn, ingest_id, inline=mode == "inline"):
                     created = True  # resending a failed ingest retries it, resuming from saved progress
         if not created:
+            event(log, "ingest.duplicate", ingest_id=str(ingest_id), scope=scope, mode=mode)
             return await self.receipt(ingest_id, with_facts=mode == "inline")
+        event(log, "ingest.received", ingest_id=str(ingest_id), scope=scope, kind=inp.kind, mode=mode,
+              chars=_input_chars(inp))
         if mode == "inline":
             try:
                 await run_ingest(self.ctx, ingest_id, allow_batch=False)
             except Exception as exc:
+                with log_context(ingest_id=str(ingest_id), scope=scope):
+                    exception(log, "ingest.failed", mode=mode, error=f"{type(exc).__name__}: {str(exc)[:300]}")
                 async with self.ctx.pool.connection() as conn:
                     await conn.execute(
                         "UPDATE memx_job SET status = 'dead', finished_at = now(), last_error = %s "
@@ -284,6 +293,7 @@ class Memory:
         """
         async with self.ctx.pool.connection() as conn:
             await scope_settings.update(conn, scope, changes)
+        event(log, "scope_settings.changed", scope=scope, changes=changes)
         return await self.scope_settings(scope)
 
     async def render(self, scope: str, *, include_ancestors: bool = True, show_scope: bool = False) -> str:
@@ -380,6 +390,9 @@ class Memory:
                     facts, ingests, scopes = await repo.forget_fact(conn, fact_id), 0, 0
                 await repo.log_forget(conn, scope=scope, fact_id=fact_id, descendants=descendants, facts=facts,
                                       ingests=ingests, requested_by=requested_by)
+        event(log, "forget", scope=scope, fact_id=str(fact_id) if fact_id else None,
+              descendants=descendants if scope else None, facts_removed=facts, ingests_removed=ingests,
+              scopes_removed=scopes, requested_by=requested_by)
         return ForgetReport(facts_removed=facts, ingests_removed=ingests, scopes_removed=scopes)
 
     async def promote(self, fact_id: UUID, to_scope: str) -> Fact:
@@ -450,7 +463,10 @@ class Memory:
                 )
                 await repo.add_decisions(conn, verdict_decisions(
                     {"id": fact.ingest_id}, candidate, plan.verdicts, target, new_id))
-            return await repo.get_fact(conn, new_id)
+            promoted = await repo.get_fact(conn, new_id)
+        event(log, "fact.promoted", fact_id=str(fact_id), new_fact_id=str(new_id), from_scope=fact.scope,
+              scope=target)
+        return promoted
 
     async def export_okf(self, scope: str, dest: BinaryIO | None = None) -> tuple[bytes, ExportReport]:
         path = str(ScopePath.parse(scope))

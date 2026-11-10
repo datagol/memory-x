@@ -12,6 +12,7 @@ from pathlib import Path
 
 from memx.config import MemxConfig
 from memx.db.migrate import migrate
+from memx.logs import event
 from memx.memory import Memory
 from memx.types import Messages, Text, Turn
 
@@ -20,8 +21,8 @@ async def _worker(args: argparse.Namespace) -> None:
     cfg = MemxConfig()
     if cfg.providers != "demo" and not cfg.has_api_key():
         # Idle, not crash: a restart loop would hide the message among restarts. Set the key and restart.
-        logging.getLogger("memx").error("OPENROUTER_API_KEY is not set; the worker is idle. Add it to .env and run "
-                                        "`docker compose up -d`.")
+        event(logging.getLogger("memx.worker"), "worker.no_key", logging.ERROR,
+              detail="OPENROUTER_API_KEY is not set; the worker is idle. Add it to .env and run `docker compose up -d`.")
         await asyncio.Event().wait()
     mem = await Memory.connect(start_runner=False)
     runner = await mem.start_runner(concurrency=args.concurrency)
@@ -29,7 +30,10 @@ async def _worker(args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    logging.getLogger("memx").info("worker %s running with %d slots", runner.worker_id, runner.concurrency)
+    cfg = mem.ctx.config
+    event(logging.getLogger("memx.worker"), "worker.started", worker_id=runner.worker_id, slots=runner.concurrency,
+          extractor_model=cfg.extractor_model, jev_model=cfg.jev_model,
+          openrouter_key="set" if cfg.has_api_key() else "missing")
     await stop.wait()
     await mem.close()
 
@@ -128,7 +132,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    from memx import logs
+
+    logs.configure()
     if args.cmd == "banner":
         from memx.banner import banner
 
