@@ -57,7 +57,7 @@ SECTION_TITLES: dict[Category, str] = {
     Category.other: "Other",
 }
 
-FactStatus = Literal["active", "superseded", "expired"]
+FactStatus = Literal["active", "superseded", "expired", "deleted"]
 RecallMode = Literal["full", "ranked"]
 
 ENTITY_TYPES = ("person", "organization", "team", "system", "project", "place", "product", "other")
@@ -187,6 +187,8 @@ class Fact(BaseModel):
     token_count: int = 0
     topic: str | None = None
     topic_confidence: float | None = None
+    deleted_at: datetime | None = None
+    deleted_by: str | None = None
     entities: list[EntityRef] = Field(default_factory=list)
 
 

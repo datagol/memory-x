@@ -1,0 +1,30 @@
+# Override for docker-compose.yml: run memx against an existing Postgres instead of the bundled container.
+#
+#   docker compose -f docker-compose.yml -f compose.local-db.yml up -d
+#
+# Set MEMX_DOCKER_DSN in .env to the database as the containers see it, e.g. a Postgres on this machine:
+#   MEMX_DOCKER_DSN=postgresql://user:password@host.docker.internal:5432/memx_db
+# The database needs Postgres 16+ with pgvector 0.8+ available; migrations create the extensions they need.
+# deploy.sh uses this file.
+#
+# Each service is written out in full: Compose does not apply !reset through a YAML alias.
+
+services:
+  # Only starts if the bundled-db profile is asked for explicitly.
+  postgres:
+    profiles: ["bundled-db"]
+
+  api:
+    depends_on: !reset {}
+    environment:
+      MEMX_DSN: ${MEMX_DOCKER_DSN:?set MEMX_DOCKER_DSN in .env}
+
+  worker:
+    depends_on: !reset {}
+    environment:
+      MEMX_DSN: ${MEMX_DOCKER_DSN:?set MEMX_DOCKER_DSN in .env}
+
+  mcp:
+    depends_on: !reset {}
+    environment:
+      MEMX_DSN: ${MEMX_DOCKER_DSN:?set MEMX_DOCKER_DSN in .env}
