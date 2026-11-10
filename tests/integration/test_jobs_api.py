@@ -97,6 +97,7 @@ async def test_resending_failed_ingest_retries_it(make_memory):
     extractor.fail = False
     receipt = await mem.insert(SCOPE, say("The user likes tea."), idempotency_key="once")
     assert receipt.status == "committed" and receipt.added == 1
+    assert receipt.scope == SCOPE and (await mem.receipt(receipt.ingest_id)).scope == SCOPE
     async with mem.ctx.pool.connection() as conn:
         assert (await queue.stats(conn)) == {"done": 1}
 

@@ -206,7 +206,8 @@ class Memory:
             if with_facts and counts.get("fact_ids"):
                 facts = await repo.facts_by_ids(conn, [UUID(i) for i in counts["fact_ids"]])
         return InsertReceipt(
-            ingest_id=ingest_id, status=row["status"], mode=row["mode"], error=row["error"], facts=facts,
+            ingest_id=ingest_id, scope=str(row["scope"]), status=row["status"], mode=row["mode"], error=row["error"],
+            facts=facts,
             **{k: counts.get(k, 0) for k in ("added", "dropped", "historical", "superseded", "shadowed", "rejected",
                                              "held_back")},
         )

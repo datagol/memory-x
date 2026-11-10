@@ -207,6 +207,7 @@ class ScoredFact(Fact):
 
 class InsertReceipt(BaseModel):
     ingest_id: UUID
+    scope: str | None = None  # where the input was stored; lets a gateway check a receipt belongs to its tenant
     status: Literal["received", "extracted", "committed", "failed"]
     mode: str
     added: int = 0
