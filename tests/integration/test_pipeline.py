@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from memx import Messages, Text, Turn
 from memx.testing import FakeJudge, SentenceExtractor
+from memx.types import Category
 
 SCOPE = "memory.acme.alex"
 
@@ -355,3 +356,37 @@ async def test_queued_insert_extracts_through_a_provider_batch(make_memory):
     done = await run_ingest(mem.ctx, receipt.ingest_id)
     assert done["added"] == 1 and done["usage"]["extract_batched_windows"] == 1
     assert [f.text for f in await mem.facts(SCOPE)] == ["The user likes oolong tea."]
+
+
+async def test_recategorize_corrects_the_category_and_logs_it(mem):
+    fact = (await mem.insert(SCOPE, say("The user prefers dark mode."))).facts[0]
+    changed = await mem.recategorize(fact.id, Category.rule, changed_by="Ada")
+    assert changed.category == Category.rule and changed.sort_confidence == 1.0
+    assert (await mem.recategorize(fact.id, Category.rule)).category == Category.rule  # no-op when unchanged
+    history = await mem.history(fact.id)
+    manual = [d for v in history.versions for d in v.decisions if d["step"] == "manual"]
+    assert len(manual) == 1 and manual[0]["result"] == {"change": "category", "from": fact.category.value,
+                                                       "to": "rule", "by": "Ada"}
+
+
+async def test_edit_fact_changes_topic_and_names_and_logs_each(mem):
+    fact = (await mem.insert(SCOPE, say("The user deploys on Fridays."))).facts[0]
+    edited = await mem.edit_fact(fact.id, topic="food_and_drink", add_entities=[("Build Farm", "system")],
+                                 changed_by="Ada")
+    farm = [e.id for e in edited.entities if e.name == "Build Farm"]
+    assert edited.topic == "food_and_drink" and len(farm) == 1
+    other = (await mem.insert(SCOPE, say("The user restarts things on Mondays."))).facts[0]
+    linked = await mem.edit_fact(other.id, add_entities=[("the build farm", "system")])
+    assert farm[0] in [e.id for e in linked.entities]  # the same name links to the same entity
+    cleared = await mem.edit_fact(fact.id, topic=None, remove_entity_ids=farm)
+    assert cleared.topic is None and farm[0] not in [e.id for e in cleared.entities]
+    history = await mem.history(fact.id)
+    manual = [d["result"] for v in history.versions for d in v.decisions if d["step"] == "manual"]
+    assert [m["change"] for m in manual] == ["topic", "entity_added", "topic", "entity_removed"]
+    assert manual[0] == {"change": "topic", "from": fact.topic, "to": "food_and_drink", "by": "Ada"}
+    try:
+        await mem.edit_fact(fact.id, topic="not_a_topic")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unknown topic must be refused")

@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
+from memx.memory import UNSET
 from memx.config import InsertMode
 from memx.documents import DocumentError, read_document
 from memx.providers.http import ProviderError
@@ -223,6 +224,33 @@ async def get_fact(fact_id: UUID, mem: Mem) -> Fact:
 @app.get("/v1/facts/{fact_id}/history", response_model=FactHistory, dependencies=v1)
 async def history(fact_id: UUID, mem: Mem) -> FactHistory:
     return await mem.history(fact_id)
+
+
+class EntityRef(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    type: str = "other"
+
+
+class FactEdit(BaseModel):
+    """A correction to how a fact is classified. Send only what changes; `topic: null` clears the topic."""
+    category: Category | None = None
+    topic: str | None = None
+    add_entities: list[EntityRef] = Field(default_factory=list, max_length=20)
+    remove_entity_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    changed_by: str | None = Field(default=None, max_length=200)  # who made the change, as the caller names them
+
+
+@app.patch("/v1/facts/{fact_id}", response_model=Fact, dependencies=v1)
+async def edit_fact(fact_id: UUID, body: FactEdit, mem: Mem) -> Fact:
+    try:
+        return await mem.edit_fact(
+            fact_id, category=body.category,
+            topic=body.topic if "topic" in body.model_fields_set else UNSET,
+            add_entities=[(e.name, e.type) for e in body.add_entities],
+            remove_entity_ids=body.remove_entity_ids, changed_by=body.changed_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 class PromoteBody(BaseModel):

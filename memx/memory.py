@@ -21,6 +21,7 @@ from memx.export.okf import build_bundle
 from memx.jobs import queue
 from memx.jobs.runner import JobRunner
 from memx.pipeline.commit import verdict_decisions
+from memx.pipeline.entities import normalize
 from memx.pipeline.ingest_job import run_ingest
 from memx.pipeline.reconcile import judge_neighbors, plan_from
 from memx.providers.embedder import Embedder, OpenRouterEmbedder
@@ -31,6 +32,8 @@ from memx.recall.engine import recall as _recall
 from memx.recall.render import render as _render
 from memx.scopes import ScopePath
 from memx.types import (
+    ENTITY_TYPES,
+    TOPIC_DEFINITIONS,
     Candidate,
     Category,
     ExportReport,
@@ -53,6 +56,9 @@ _INPUT = TypeAdapter(IngestInput)
 
 class InputTooLarge(ValueError):
     pass
+
+
+UNSET: Any = object()  # an edit argument that was not given, as opposed to one given as None
 
 
 class NotFound(LookupError):
@@ -206,7 +212,8 @@ class Memory:
             if with_facts and counts.get("fact_ids"):
                 facts = await repo.facts_by_ids(conn, [UUID(i) for i in counts["fact_ids"]])
         return InsertReceipt(
-            ingest_id=ingest_id, status=row["status"], mode=row["mode"], error=row["error"], facts=facts,
+            ingest_id=ingest_id, scope=str(row["scope"]), status=row["status"], mode=row["mode"], error=row["error"],
+            facts=facts,
             **{k: counts.get(k, 0) for k in ("added", "dropped", "historical", "superseded", "shadowed", "rejected",
                                              "held_back")},
         )
@@ -380,6 +387,79 @@ class Memory:
                 await repo.log_forget(conn, scope=scope, fact_id=fact_id, descendants=descendants, facts=facts,
                                       ingests=ingests, requested_by=requested_by)
         return ForgetReport(facts_removed=facts, ingests_removed=ingests, scopes_removed=scopes)
+
+    async def recategorize(self, fact_id: UUID, category: Category, *, changed_by: str | None = None) -> Fact:
+        """A person corrects a fact's category (see edit_fact)."""
+        return await self.edit_fact(fact_id, category=category, changed_by=changed_by)
+
+    async def edit_fact(
+        self, fact_id: UUID, *, category: Category | None = None, topic: str | None | object = UNSET,
+        add_entities: list[tuple[str, str]] | None = None, remove_entity_ids: list[UUID] | None = None,
+        changed_by: str | None = None,
+    ) -> Fact:
+        """A person corrects how a fact is classified: its category, its topic (None clears it) and the named
+        entities it mentions (added as (name, type) pairs, removed by id). The text stays as it is.
+
+        A corrected category makes the sort certain (confidence 1) and an event's expiry follows it; a corrected topic
+        is certain too. An added name links to the tenant's entity of that name, or creates one. Every change is logged
+        as a 'manual' decision, so the fact's history shows who changed what."""
+        if topic is not UNSET and topic is not None and topic not in TOPIC_DEFINITIONS:
+            raise ValueError(f"unknown topic {topic!r}")
+        for name, etype in add_entities or []:
+            if not normalize(name):
+                raise ValueError(f"{name!r} is not a usable name")
+            if etype not in ENTITY_TYPES:
+                raise ValueError(f"unknown entity type {etype!r}")
+        cfg = self.ctx.config
+        async with self.ctx.pool.connection() as conn:
+            fact = await repo.get_fact(conn, fact_id)
+            if fact is None:
+                raise NotFound(f"fact {fact_id} not found")
+            if fact.status != "active":
+                raise ValueError("only active facts can be edited")
+            changes: list[dict[str, Any]] = []
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (fact.scope,))
+                if category is not None and category != fact.category:
+                    stale_after = None
+                    if category == Category.event and fact.event_at and fact.event_at.date() >= fact.observed_at.date():
+                        ttl = (await scope_settings.resolve(conn, cfg, fact.scope))["event_ttl_days"]
+                        stale_after = fact.event_at + timedelta(days=ttl) if ttl else None
+                    await conn.execute(
+                        "UPDATE memx_fact SET category = %s, sort_confidence = 1.0, stale_after = %s WHERE id = %s",
+                        (category.value, stale_after, fact_id),
+                    )
+                    changes.append({"change": "category", "from": fact.category.value, "to": category.value})
+                if topic is not UNSET and topic != fact.topic:
+                    await conn.execute(
+                        "UPDATE memx_fact SET topic = %s, topic_confidence = %s WHERE id = %s",
+                        (topic, 1.0 if topic else None, fact_id),
+                    )
+                    changes.append({"change": "topic", "from": fact.topic, "to": topic})
+                tenant = ScopePath.parse(fact.scope).tenant
+                current = {e["id"]: e for e in (await repo.entities_for_facts(conn, [fact_id])).get(fact_id, [])}
+                for entity_id in remove_entity_ids or []:
+                    if entity_id in current:
+                        await conn.execute("DELETE FROM memx_fact_entity WHERE fact_id = %s AND entity_id = %s",
+                                           (fact_id, entity_id))
+                        changes.append({"change": "entity_removed", "name": current[entity_id]["name"]})
+                for name, etype in add_entities or []:
+                    norm = normalize(name)
+                    known = await repo.find_entities_exact(conn, tenant, norm)
+                    entity_id = known[0]["id"] if known else await repo.upsert_entity(conn, tenant, name.strip(), norm, etype)
+                    if entity_id not in current:
+                        await repo.link_entity(conn, fact_id, entity_id, name.strip())
+                        current[entity_id] = {"id": entity_id, "name": known[0]["name"] if known else name.strip()}
+                        changes.append({"change": "entity_added", "name": current[entity_id]["name"], "type": etype})
+                if remove_entity_ids:
+                    await repo.prune_entities(conn)
+                if changes:
+                    await repo.add_decisions(conn, [{
+                        "step": "manual", "question_version": "manual-1", "subject_fact_id": fact_id,
+                        "scope": fact.scope, "result": {**change, "by": changed_by},
+                    } for change in changes])
+            edited = await repo.get_fact(conn, fact_id)
+            return (await repo.attach_entities(conn, [edited]))[0]
 
     async def promote(self, fact_id: UUID, to_scope: str) -> Fact:
         """Copy a fact to a broader scope, reconciling it there; the original is superseded by the copy."""
