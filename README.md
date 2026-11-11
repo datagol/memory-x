@@ -260,10 +260,10 @@ A scope is a dot path of any depth, such as `memory.{tenant}.{user}.{agent}`. La
 | Preference | What someone likes, dislikes, or how they want things done or presented | 365 days |
 | Goal | An outcome someone wants, a plan, an intention, or a project they are pursuing | 180 days |
 | Relationship | A connection between people, teams or organizations | 365 days |
-| Work context | Tools, systems, datasets, repositories, environments, or the current state of ongoing work | 120 days |
+| Work context | How the work or the business operates: tools, systems, datasets, environments, the current state of ongoing work, and domain knowledge such as what a term means or a business fact | 120 days |
 | Procedure | A method, workflow or sequence of steps | 365 days |
 | Event | Something that happened or is scheduled at a particular time | 30 days |
-| Other | None of the above, too vague, or flagged | 90 days |
+| Other | Too vague to place, or flagged. An unsure answer is filed under its likeliest real category instead | 90 days |
 
 Half-lives only affect ranking. A fact's age counts from when it was observed or last repeated, so saying something again keeps it fresh.
 

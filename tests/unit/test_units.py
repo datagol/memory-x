@@ -126,7 +126,20 @@ def test_sort_resolve_thresholds():
     assert resolve(ok, CFG, 1).category == Category.preference
     weak = {"category": {"choice": "goal", "probabilities": {**probs, "goal": 0.3}, "confidence": 0.3},
             "injection": {"noul": 0.01}}
-    assert resolve(weak, CFG, 1).category == Category.other
+    # an unsure answer keeps its best real category instead of falling into "other"
+    assert resolve(weak, CFG, 1).category == Category.goal
+    # "other" as the pick gives way to the next real category
+    vague = {"category": {"choice": "other", "confidence": 0.44,
+                          "probabilities": {**probs, "other": 0.5, "rule": 0.28, "work_context": 0.12}},
+             "injection": {"noul": 0.01}}
+    assert resolve(vague, CFG, 1).category == Category.work_context
+    # a rule is always given to agents, so it needs a confident answer and is never the fallback
+    weak_rule = {"category": {"choice": "rule", "probabilities": {**probs, "rule": 0.4, "goal": 0.3}, "confidence": 0.4},
+                 "injection": {"noul": 0.01}}
+    assert resolve(weak_rule, CFG, 1).category == Category.goal
+    nothing = {"category": {"choice": "other", "probabilities": {**probs, "other": 1.0}, "confidence": 0.9},
+               "injection": {"noul": 0.01}}
+    assert resolve(nothing, CFG, 1).category == Category.other
     injected = {**ok, "injection": {"noul": 0.7}}
     assert resolve(injected, CFG, 1).category == Category.other
 
@@ -403,3 +416,12 @@ def test_recall_defaults_are_wide():
     assert cfg.grade_max >= cfg.recall_k_max, "everything that can be returned must have been graded"
     assert cfg.recall_k_vector + cfg.recall_k_fts >= cfg.grade_max, "the grader must be offered enough candidates"
     assert cfg.budget_tokens == 4_000
+
+
+def test_empty_env_var_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("MEMX_INSERT_MODE", "")
+    monkeypatch.setenv("MEMX_POOL_MAX", "")
+    cfg = MemxConfig(_env_file=None)
+    assert cfg.insert_mode == "background"
+    assert cfg.pool_max == 10
+

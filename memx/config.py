@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 InsertMode = Literal["inline", "background", "queued"]
@@ -20,10 +20,26 @@ DEFAULT_HALF_LIVES: dict[str, float | None] = {
 }
 
 
+# Settings where an empty string is a real value.
+_TEXT_TYPES = (str, SecretStr, str | None, SecretStr | None)
+
+
 class MemxConfig(BaseSettings):
     """All tunables. Read from MEMX_* env vars and .env."""
 
     model_config = SettingsConfigDict(env_prefix="MEMX_", env_file=".env", extra="ignore")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_means_default(cls, value: Any, info: ValidationInfo) -> Any:
+        """A deploy template that passes MEMX_INSERT_MODE="" or MEMX_POOL_MAX="" means "use the default", not
+        "fail at startup". A blank text setting stays blank: MEMX_API_TOKEN="" is how a token is switched off."""
+        if value != "" or info.field_name is None:
+            return value
+        field = cls.model_fields[info.field_name]
+        if field.annotation in _TEXT_TYPES:
+            return value
+        return field.get_default(call_default_factory=True)
 
     dsn: str = "postgresql://memx:memx@localhost:5433/memx"
     pool_min: int = 1

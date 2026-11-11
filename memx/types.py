@@ -26,10 +26,13 @@ CATEGORY_DEFINITIONS: dict[str, str] = {
     "goal": "An outcome someone wants, a plan, an intention, or a project they are pursuing.",
     "rule": "A constraint, policy, requirement, or prohibition: must, must not, always, never.",
     "relationship": "A connection between people, teams, or organizations (reports to, works with, married to, client of).",
-    "work_context": "Tools, systems, datasets, repositories, environments, or the current state of ongoing work.",
+    "work_context": (
+        "How the work or the business operates: tools, systems, datasets, environments, the current state of ongoing "
+        "work, and domain knowledge such as what a term means, how a product or service works, or a business fact."
+    ),
     "event": "Something that happened or is scheduled to happen at a particular time.",
     "procedure": "A method, workflow, or sequence of steps for doing something.",
-    "other": "None of the above, or too vague to tell.",
+    "other": "Too vague or too empty to say what it is about. Not for a statement that merely fits a category loosely.",
 }
 
 # Order sections appear in when rendered.
@@ -207,6 +210,7 @@ class ScoredFact(Fact):
 
 class InsertReceipt(BaseModel):
     ingest_id: UUID
+    scope: str | None = None  # where the input was stored; lets a gateway check a receipt belongs to its tenant
     status: Literal["received", "extracted", "committed", "failed"]
     mode: str
     added: int = 0

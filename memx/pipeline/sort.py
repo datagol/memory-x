@@ -10,7 +10,7 @@ from memx.config import MemxConfig
 from memx.providers.jev import UNTRUSTED_NOTE, Choice, Judge, YesNo, clip, envelope
 from memx.types import CATEGORY_DEFINITIONS, TOPIC_DEFINITIONS, Candidate, Category
 
-SORT_VERSION = "sort.v2"  # v2 added the topic question
+SORT_VERSION = "sort.v3"  # v2 added the topic question; v3 files an unsure answer under its best real category
 
 QUESTIONS = {
     "category": Choice(
@@ -73,6 +73,16 @@ def sort_state(candidate: Candidate, *, use_hint: bool = True) -> dict[str, Any]
     )
 
 
+def _best_real_category(probs: dict[str, float]) -> Category:
+    """Where an unsure answer goes: the likeliest real category, so "other" stays rare.
+
+    A rule is always given to agents, so a memory only becomes one on a confident answer, never as a fallback.
+    """
+    real = {k: v for k, v in probs.items()
+            if k in Category.__members__ and k not in (Category.other.value, Category.rule.value) and v > 0}
+    return Category(max(real, key=real.__getitem__)) if real else Category.other
+
+
 def resolve(answers: dict[str, dict[str, Any]], cfg: MemxConfig, latency_ms: int) -> SortResult:
     cat = answers["category"]
     probs = {k: float(v) for k, v in (cat.get("probabilities") or {}).items()}
@@ -81,8 +91,11 @@ def resolve(answers: dict[str, dict[str, Any]], cfg: MemxConfig, latency_ms: int
     confidence = float(cat.get("confidence", top))
     injection = float(answers["injection"].get("noul", 0.0))
     category = Category(choice) if choice in Category.__members__ else Category.other
-    if top < cfg.sort_min_prob or confidence < cfg.sort_min_confidence or injection >= cfg.injection_flag:
+    unsure = top < cfg.sort_min_prob or confidence < cfg.sort_min_confidence
+    if injection >= cfg.injection_flag:
         category = Category.other
+    elif unsure or category is Category.other:
+        category = _best_real_category(probs)
     topic = None
     topic_conf = None
     topic_probs: dict[str, float] = {}
