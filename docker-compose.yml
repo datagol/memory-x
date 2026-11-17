@@ -52,6 +52,7 @@ services:
     environment:
       <<: *memx-env
       MEMX_INSERT_MODE: ${MEMX_INSERT_MODE:-queued}
+      MEMX_ALLOWED_HOSTS: ${MEMX_ALLOWED_HOSTS:-}
       # For the start-up message: the published addresses, and the MCP server to wait for.
       MEMX_PUBLISH: ${MEMX_PUBLISH:-127.0.0.1:8000}
       MEMX_MCP_PUBLISH: ${MEMX_MCP_PUBLISH:-127.0.0.1:8100}

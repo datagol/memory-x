@@ -7,6 +7,7 @@ structured output on any OpenRouter model that supports tool calling.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -139,6 +140,14 @@ def date_anchors(observed_at: datetime) -> str:
     )
 
 
+_TAGS = re.compile(r"<(/?)(transcript|document|context_only|already_recorded)\b", re.IGNORECASE)
+
+
+def _inert(text: str) -> str:
+    """Input that spells one of the prompt's own tags could close its section early; make such a tag plain text."""
+    return _TAGS.sub(r"[\1\2", text)
+
+
 def render_window(window: Window, *, observed_at: datetime, total_windows: int,
                   already: list[str] | None = None) -> str:
     lines = [
@@ -149,16 +158,17 @@ def render_window(window: Window, *, observed_at: datetime, total_windows: int,
     if window.kind == "messages":
         if window.context:
             lines.append("<context_only>")
-            lines += [f"[{u.role}{_stamp(u.at)}]: {u.text}" for u in window.context]
+            lines += [f"[{u.role}{_stamp(u.at)}]: {_inert(u.text)}" for u in window.context]
             lines.append("</context_only>")
         lines.append("<transcript>")
-        lines += [f"[{u.role}{_stamp(u.at)}]: {u.text}" for u in window.units]
+        lines += [f"[{u.role}{_stamp(u.at)}]: {_inert(u.text)}" for u in window.units]
         lines.append("</transcript>")
     else:
         if window.context:
-            lines += ["<context_only>", window.context[0].text, "</context_only>"]
-        lines.append(f'<document source="{window.source or "document"}">')
-        lines += [u.text for u in window.units]
+            lines += ["<context_only>", _inert(window.context[0].text), "</context_only>"]
+        source = re.sub(r'[<>"\n\r]', " ", window.source or "document").strip()[:200] or "document"
+        lines.append(f'<document source="{source}">')
+        lines += [_inert(u.text) for u in window.units]
         lines.append("</document>")
     if already:
         lines += ["<already_recorded>", CONTINUE_NOTE] + [f"- {t}" for t in already] + ["</already_recorded>"]
@@ -289,7 +299,7 @@ class OpenRouterExtractor:
         tokens_in = tokens_out = 0
         last_error = ""
         for _ in range(2):
-            data = await self._http.post("/chat/completions", body)
+            data = await self._http.post("/chat/completions", body, timeout=self._http.timeout * 3)
             try:
                 result = self.parse_response(data)
             except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:

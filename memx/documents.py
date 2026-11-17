@@ -58,8 +58,11 @@ def _decode(data: bytes, filename: str | None) -> str:
 
 
 def _read_pdf(data: bytes, filename: str | None) -> Document:
-    from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PdfReadError
+    except ImportError as exc:
+        raise DocumentError("reading PDFs needs pypdf: pip install 'memx[pdf]'") from exc
 
     name = filename or "the PDF"
     try:

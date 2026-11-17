@@ -169,7 +169,7 @@ async def test_reresolve_merges_short_names_into_the_full_entity(make_memory):
     assert {"Priya", "Priya Lindqvist"} <= {e["name"] for e in await mem.entities(ORG)}
     mem.ctx.judge.merge = lambda a, b: 0.9  # type: ignore[attr-defined]
     report = await mem.reresolve_entities()
-    assert report == [{"tenant": "halvorsen", "short": "Priya", "into": "Priya Lindqvist", "how": "shares a word",
+    assert report == [{"tenant": "memory.halvorsen", "short": "Priya", "into": "Priya Lindqvist", "how": "shares a word",
                        "p_same": 0.9, "merged": True}]
     ents = {e["name"]: e for e in await mem.entities(ORG)}
     assert "Priya" not in ents and ents["Priya Lindqvist"]["active"] == 2 and "priya" in ents["Priya Lindqvist"]["aliases"]
@@ -256,7 +256,7 @@ async def test_dashboard_graph_and_entities_endpoints(make_memory):
     from memx_api.app import app
 
     app.state.memory = await make_memory(extractor=SentenceExtractor())
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as c:
         r = await c.post(f"/v1/scopes/{ORG}/ingests", json={"input": {"kind": "text", "text": HALVORSEN}, "mode": "inline"})
         assert r.status_code == 200, r.text
         g = (await c.get(f"/v1/graph?scope={ORG}")).json()
@@ -278,7 +278,7 @@ async def test_tenants_never_share_entities(make_memory):
     async with mem.ctx.pool.connection() as conn:
         cur = await conn.execute("SELECT tenant, name FROM memx_entity ORDER BY tenant, name")
         rows = [(r["tenant"], r["name"]) for r in await cur.fetchall()]
-    assert ("company_b", "Priya") in rows and ("company_a", "Priya Lindqvist") in rows
+    assert ("memory.company_b", "Priya") in rows and ("memory.company_a", "Priya Lindqvist") in rows
     assert not any(t == "company_b" and n == "Priya Lindqvist" for t, n in rows)
     judge: FakeJudge = mem.ctx.judge  # type: ignore[assignment]
     assert not any("pairs" in s.get("untrusted", {}) for s, _ in judge.requests), "no merge question across tenants"
@@ -399,7 +399,7 @@ async def test_reresolve_merges_variants_found_through_alternative_names(make_me
     judge.merge = merges_only(("Blore", "Bangalore"))
     report = await mem.reresolve_entities()
     merged = [r for r in report if r["merged"]]
-    assert merged == [{"tenant": "halvorsen", "short": "Blore", "into": "Bangalore", "how": "suggested alternative name",
+    assert merged == [{"tenant": "memory.halvorsen", "short": "Blore", "into": "Bangalore", "how": "suggested alternative name",
                        "p_same": 0.9, "merged": True}]  # the one with fewer facts folds into the one with more
     names = {e["name"]: e for e in await mem.entities(ORG)}
     assert "Blore" not in names and names["Bangalore"]["active"] == 3
@@ -424,3 +424,12 @@ async def test_names_repeated_in_one_insert_are_not_questioned(make_memory):
     await mem.insert(ORG, Text(text="Mahesh moved to Bangalore. Mahesh joined the data team."), idempotency_key="a")
     assert [r["norm"] for r in await entity_rows(mem) if r["name"] == "Mahesh"] == ["mahesh"]
     assert await merge_requests(judge) == []
+
+
+async def test_two_roots_with_the_same_label_do_not_share_entities(make_memory):
+    mem = await make_memory(extractor=SentenceExtractor(entities={"priya joined": ("Priya", "person")}))
+    await mem.insert("memory.acme.alex", Text(text="Priya joined the security call."))
+    await mem.insert("other.acme.sam", Text(text="Priya joined the bakery."))
+    async with mem.ctx.pool.connection() as conn:
+        cur = await conn.execute("SELECT tenant FROM memx_entity WHERE name = 'Priya' ORDER BY tenant")
+        assert [r["tenant"] for r in await cur.fetchall()] == ["memory.acme", "other.acme"]

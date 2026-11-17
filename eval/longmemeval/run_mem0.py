@@ -25,6 +25,7 @@ from mem0 import AsyncMemory  # noqa: E402
 from eval.longmemeval.run import (
     ANSWER_PROMPT, BENCH_DSN, DATA, RESULTS, chat, judge_prompt, judged_yes, parse_date, scope_label, select, summarize,
 )
+from eval import bench_dsn
 from memx import MemxConfig
 from memx.providers.http import OpenRouterHTTP
 
@@ -131,7 +132,7 @@ async def main_async(args) -> None:
     DB = args.dsn.rsplit("/", 1)[-1]
     if args.limit:
         chosen = chosen[: args.limit]
-    cfg = MemxConfig(dsn=args.dsn)
+    cfg = MemxConfig(dsn=bench_dsn(args.dsn))
     mem = AsyncMemory.from_config(mem0_config(cfg, args.extract_model, args.collection))
     http = OpenRouterHTTP(cfg.api_key(), cfg.openrouter_base_url, timeout_s=120)
     run_id = args.resume or datetime.now(UTC).strftime("%Y%m%dT%H%M%S")

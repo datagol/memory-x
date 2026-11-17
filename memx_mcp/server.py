@@ -21,7 +21,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
+from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound, __version__
 from memx.db import repo
 from memx.providers.http import ProviderError
 from memx.types import Category, Fact, InsertReceipt, Messages, Text, Turn
@@ -43,7 +43,7 @@ INSTRUCTIONS = f"""memx is long-term memory for this conversation's user, shared
   running, check later with `ingest_status`.
 """
 
-mcp = MCPServer(name="memx", title="memx memory", instructions=INSTRUCTIONS, version="0.1.0")
+mcp = MCPServer(name="memx", title="memx memory", instructions=INSTRUCTIONS, version=__version__)
 
 
 # ---- connection ----------------------------------------------------------------------------------------------------

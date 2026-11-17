@@ -1,6 +1,6 @@
 # memx
 
-Scoped, auditable long-term memory for DataGOL agents.
+Scoped, auditable long-term memory for AI agents, on Postgres. Built at DataGOL.
 
 memx turns conversations and documents into small, atomic facts stored in Postgres. It decides whether each new fact repeats, replaces or adds to what is already known. It links facts through the people, teams and systems they mention. When an agent needs context, memx hands it a markdown memory block: the whole memory when it fits the token budget, or a ranked slice chosen for the question when it does not.
 
@@ -114,6 +114,8 @@ docker compose -f compose.demo.yml down -v         # remove it
 
 ### Library and CLI without Docker for the app
 
+To use memx as a library in your own application, install it without the server parts: `pip install .` gives `from memx import Memory` and the `memx` command. The HTTP API, the MCP server and PDF reading are extras (`pip install '.[api]'`, `'.[mcp]'`, `'.[pdf]'`, or `'.[server]'` for all three). [`examples/quickstart.py`](examples/quickstart.py) is a first script to run.
+
 For development, run only Postgres in Docker and memx from source (Python 3.12 and [uv](https://docs.astral.sh/uv/)):
 
 ```bash
@@ -213,12 +215,12 @@ A fact is visible when it is active, not expired, not flagged as an injection, a
 
 ### Ranked mode
 
-1. **Search.** Vector search (40 hits) and full-text search (20 hits) over the visible facts, merged by reciprocal rank.
+1. **Search.** Vector search (80 hits) and full-text search (30 hits) over the visible facts, merged by reciprocal rank.
 2. **Walk.** From the top 10 search hits, memx follows shared entities for up to two hops. A hit's score is split across the other facts that name the same entity and halved per hop. Entities named in more than 20% of visible facts, like the company's own name, are not followed at all. Shared themes count too, at 30% weight. Up to 8 facts the search missed are added, each with the path that reached it, such as "Marcus Oyelaran approved retiring ARCHIVE-02 → Marcus Oyelaran → Marcus leads the data platform team → data platform team → the team owns all database migrations".
 3. **Grade.** One Jev request rates every candidate on five levels, from irrelevant to critical. A fact reached through an entity is judged *together with the fact it is linked to*; judged alone, "Priya Lindqvist leads the Security Team" looks irrelevant to a question about Snowflake access. A search hit that also has a link is graded alone and with the link, and keeps the higher grade.
-4. **Cut.** Search hits need a relevance of at least 0.3 ("background" is not enough). Walked facts need 0.5 ("useful").
+4. **Cut.** Search hits need a relevance of at least 0.1. Walked facts need 0.5 ("useful").
 5. **Score.** `relevance × (0.6 + 0.4 × freshness) × (0.5 + 0.5 × trust) × recall-history boost`, times 0.85 for walked facts so a direct hit wins ties.
-6. **Fit.** Facts are taken in score order until the budget or the 30-fact limit is reached.
+6. **Fit.** Facts are taken in score order until the budget or the 80-fact limit is reached.
 7. **Render.** Picked facts are grouped by category, related facts nested together and dated (so two disagreeing statements show which is newer), events prefixed with their date. In ranked recall the most relevant come first: sections are ordered by their best-scoring fact and facts by score, so the model reads the best match first. A full-memory block has no question to rank by, so it uses a fixed section order and orders facts by trust and freshness. Either way the same input renders the same way.
 8. **History, when asked.** The grade request also asks whether the question is about an earlier or changed state ("what was my previous goal?"). If so, the versions each picked fact replaced are listed under it, dated, within the budget.
 
@@ -363,8 +365,9 @@ async with await Memory.connect() as mem:
 | `facts(scope, status=, category=, include_ancestors=)` / `get_fact(id)` | Raw facts, with their entities |
 | `entities(scope, view=)` | Entities named around a scope, with fact counts |
 | `history(fact_id)` | Version chain plus the decisions behind each change |
-| `forget(scope= \| fact_id=, descendants=, requested_by=)` | Hard delete, recorded in the forget log |
-| `promote(fact_id, to_scope)` | Move a fact to a broader scope |
+| `forget(scope= \| fact_id=, descendants=, requested_by=)` | Hard delete, recorded in the forget log. A scope goes with its raw inputs; a single fact leaves its raw input in place |
+| `edit_fact(fact_id, category=, topic=, add_entities=, remove_entity_ids=, changed_by=)` | A person corrects how a fact is classified; logged as a manual decision |
+| `promote(fact_id, to_scope)` | Move a fact to a broader scope of its own (an ancestor); anything else is refused |
 | `export_okf(scope)` | Open Knowledge Format zip of a scope subtree |
 | `reresolve_entities(tenant=None)` | Repair pass: fill in missing name embeddings, pair stored entities that may be the same (shared words, alternative names, similar names), ask Jev, and merge agreed pairs into the entity with more facts. All tenants unless one is given |
 | `scope_settings(scope)` / `set_scope_settings(scope, **values)` | Read the effective settings at a scope (each value with the scope it comes from), or override them; `None` inherits again |
@@ -389,7 +392,8 @@ All `/v1` routes need `Authorization: Bearer $MEMX_API_TOKEN` when a token is se
 | GET | `/v1/scopes/{scope}/facts` | Facts, filterable by status and category |
 | GET | `/v1/scopes/{scope}/export.okf` | OKF zip |
 | GET | `/v1/facts/{id}`, `/v1/facts/{id}/history` | One fact; its version history |
-| POST | `/v1/facts/{id}/promote` | Body `{"to_scope"}` |
+| PATCH | `/v1/facts/{id}` | Correct a fact's category, theme or names. Body `{"category", "topic", "add_entities", "remove_entity_ids", "changed_by"}`; send only what changes |
+| POST | `/v1/facts/{id}/promote` | Body `{"to_scope"}`; the target must be a broader scope of the fact's own |
 | DELETE | `/v1/scopes/{scope}?descendants=true`, `/v1/facts/{id}` | Forget. `X-Requested-By` is logged |
 | GET | `/healthz`, `/readyz` | Liveness; database and queue readiness |
 
@@ -412,7 +416,7 @@ memx recall SCOPE "question" [--json]
 memx render SCOPE [--show-scope]
 memx history FACT_ID
 memx export SCOPE out.zip
-memx entities-reresolve [--tenant company_2]  # repair pass for entity name merges; all tenants by default
+memx entities-reresolve [--tenant memory.acme] # repair pass for entity name merges; all tenants by default
 memx rereconcile [--scope S] [--dry-run]       # re-apply the current reconcile policy to logged verdicts
 memx expiry-reapply [--scope S] [--dry-run]    # recompute event expiry under the current settings
 memx sweep
@@ -468,9 +472,9 @@ Every field of `memx/config.py` can be set as an environment variable `MEMX_<FIE
 | Variable | Default | Meaning |
 |---|---|---|
 | `MEMX_BUDGET_TOKENS` | `4000` | Token budget; full mode when the visible memory fits 90% of it |
-| `MEMX_GRADE_FLOOR` | `0.3` | Minimum relevance for search hits |
-| `MEMX_RECALL_K_MAX` | `30` | Most facts per block |
-| `MEMX_GRADE_MAX` | `40` | Most search hits sent to Jev |
+| `MEMX_GRADE_FLOOR` | `0.1` | Minimum relevance for search hits |
+| `MEMX_RECALL_K_MAX` | `80` | Most facts per block |
+| `MEMX_GRADE_MAX` | `90` | Most search hits sent to Jev |
 | `MEMX_WALK_ENABLED` | `true` | Walk through shared entities |
 | `MEMX_WALK_HOPS` / `MEMX_WALK_CAP` / `MEMX_WALK_SEEDS` | `2` / `8` / `10` | Hops, facts added, search hits to start from |
 | `MEMX_WALK_HUB_SHARE` / `MEMX_WALK_HUB_MIN_DEGREE` | `0.2` / `6` | Entities in more than this share of facts (and at least this many) are not walked |
@@ -486,6 +490,7 @@ Every field of `memx/config.py` can be set as an environment variable `MEMX_<FIE
 | `MEMX_EVENT_TTL_DAYS` | unset | If set, upcoming events expire this long after their date. Unset: events never expire and fade with the event half-life |
 | `MEMX_EXPIRED_RETENTION_DAYS` | `30` | Expired facts are deleted after this |
 | `MEMX_DECISION_RETENTION_DAYS` | `180` | Decision log retention |
+| `MEMX_RECALL_LOG_RETENTION_DAYS` | `90` | Recall logs (each holds its candidates' text) are deleted after this; `0` keeps them |
 | `MEMX_WORKER_CONCURRENCY` | `4` | Jobs per worker |
 | `MEMX_JOB_MAX_ATTEMPTS` / `MEMX_JOB_LEASE_SECONDS` | `5` / `300` | Retries before a job is dead; lease before a stuck job is requeued |
 
@@ -512,7 +517,8 @@ Indexes: HNSW on embeddings, GIN on the full-text vector, GiST on scope paths, a
 
 - **Nothing is edited in place.** Replaced facts keep their row with `superseded_by`; shadows are links; expiry is a status change before a delayed purge.
 - **Every fact traces back** to its raw input and its position in it, and to the decisions that categorized and reconciled it.
-- **Forget is complete.** Deleting a scope removes its raw inputs, facts, links, entity mentions, decisions and recall logs in one transaction, then removes entities no longer named anywhere. The forget log keeps counts and who asked, never content.
+- **Forget is complete.** Deleting a scope removes its raw inputs, facts, links, entity mentions, decisions and recall logs in one transaction, then removes entities no longer named anywhere. The forget log keeps counts and who asked, never content. Deleting one fact removes the fact, its decisions, and its wording from the saved extraction and from recall logs; the raw input it was extracted from stays, because it may hold other facts, until its scope is forgotten.
+- **One token, every scope.** `MEMX_API_TOKEN` grants the whole API: any scope can be read, written or forgotten, and a fact can be opened by its id alone. memx does not know who your users are. The application in front of it must decide which scope a signed-in user may use and never pass a scope or fact id straight from a client. Without a token the API answers only requests addressed to this machine (`MEMX_ALLOWED_HOSTS`).
 - **User text never reaches Jev as instructions.** It always sits under an `untrusted` key in the judge's input, with a note to ignore directives inside it, and never appears in question wording or option labels.
 - **Tenants never share entities**, and recall only ever considers facts visible to the asking scope, including during the walk.
 
@@ -528,7 +534,7 @@ Postgres needs version 16 or later with pgvector 0.8 or later.
 
 ```bash
 docker compose up -d postgres
-.venv/bin/pytest                         # 137 tests with stand-in models; creates and drops a memx_test database
+.venv/bin/pytest                         # about 200 tests with stand-in models; creates and drops a memx_test database
 MEMX_LIVE=1 .venv/bin/pytest -m live     # real Haiku, embeddings and Jev via OpenRouter (about $0.01)
 ```
 
@@ -564,8 +570,10 @@ memx/                 library
   jobs/               Postgres queue and runner
   export/             OKF bundle
 memx_api/             FastAPI app and dashboard routes
+memx_mcp/             MCP server (HTTP and stdio)
+examples/             a first script to run
 web/                  React dashboard (builds into memx_api/static)
-eval/longmemeval/     benchmark harness, mem0 comparison, band calibration
+eval/                 benchmark harnesses (LongMemEval, LoCoMo, BEAM), probes and miss analysis
 tests/                unit and integration tests
 k8s/                  Kubernetes manifests
 ```
@@ -593,3 +601,9 @@ Each of these came from a real failure found while testing against the live mode
 - **"The user" has no name.** Facts from a user's own conversations say "The user…", and nothing tells memx that the user at `memory.acme.alex` is Alex. A per-scope subject would let those facts link to the person entity. Proposed, not built.
 - **Named participants get full trust.** A colleague's claim about the user counts as much as the user's own statement. A separate, lower trust for named participants is under consideration.
 - **Direct provider clients.** Everything goes through OpenRouter today. Direct Anthropic, OpenAI or TypeSafe clients fit behind the same `Extractor`, `Embedder` and `Judge` interfaces.
+
+## Contributing, security and licence
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setup and what a change needs. [SECURITY.md](SECURITY.md) says how to report a vulnerability and what memx does and does not protect. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+memx is licensed under the [Apache License 2.0](LICENSE).

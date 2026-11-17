@@ -45,8 +45,9 @@ class ScopePath:
 
     @property
     def tenant(self) -> str:
-        """The label under the root: `company_2` in `memory.company_2.user_3`. A bare root scope is its own tenant."""
-        return self.labels[1] if len(self.labels) > 1 else self.labels[0]
+        """The root and the label under it: `memory.company_2` for `memory.company_2.user_3`. Entities are shared
+        within a tenant and never across tenants. A bare root scope is its own tenant."""
+        return ".".join(self.labels[:2])
 
     def chain(self) -> list[ScopePath]:
         """Ancestors first, self last."""

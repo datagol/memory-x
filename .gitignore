@@ -23,3 +23,20 @@ eval/locomo/data/
 # local agent state
 .claude/
 .hermes/
+# build and tool output
+build/
+*.egg-info/
+.coverage
+htmlcov/
+.mypy_cache/
+*.tsbuildinfo
+web/dist/
+docs/paper/tech-report/*.toc
+docs/paper/tech-report/*.bbl
+docs/paper/tech-report/*.blg
+docs/paper/tech-report/*.fls
+docs/paper/tech-report/*.fdb_latexmk
+docs/paper/tech-report/*.synctex.gz
+# editors
+.idea/
+.vscode/

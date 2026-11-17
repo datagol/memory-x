@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
     e.add_argument("scope")
     e.add_argument("out")
     er = sub.add_parser("entities-reresolve", help="re-ask Jev about short entity names and merge agreed ones")
-    er.add_argument("--tenant", default=None, help="one tenant (the label under memory); default: all")
+    er.add_argument("--tenant", default=None, help="one tenant, as root.label (memory.acme); default: all")
     rr = sub.add_parser("rereconcile", help="undo logged replacements the current policy would not make")
     rr.add_argument("--scope", default=None, help="this scope and everything under it; default: all")
     rr.add_argument("--dry-run", action="store_true", help="report only")

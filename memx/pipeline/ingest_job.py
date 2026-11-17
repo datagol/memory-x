@@ -11,6 +11,7 @@ from memx import scope_settings
 from memx import usage as usage_tracker
 from memx.context import Context
 from memx.db import repo
+from memx.db.pool import Borrowed
 from memx.pipeline.commit import commit_candidate, db_now, reject_candidate
 from memx.pipeline.entities import EntityPlan, is_generic, normalize, plan_entities
 from memx.pipeline.extract import ensure_candidates
@@ -55,7 +56,8 @@ async def _process(ctx: Context, ingest: dict[str, Any], candidate: Candidate, e
     cfg = ctx.config
     started = time.perf_counter()
     trace: dict[str, Any] = {"sort": sort_trace(sort), "neighbors": []}
-    async with ctx.pool.connection() as conn:
+    async with Borrowed(ctx.pool) as conn:  # handed back to the pool during each Jev question
+        judge = conn.judge(ctx.judge)
         if sort is None:
             return await reject_candidate(conn, ingest=ingest, candidate=candidate, sort=None, scope=scope,
                                           reason="too_long", trace=trace)
@@ -69,11 +71,11 @@ async def _process(ctx: Context, ingest: dict[str, Any], candidate: Candidate, e
             trace["note"] = "suspected injection: stored flagged, not reconciled"
         else:
             verdicts = await judge_neighbors(
-                conn, ctx.judge, cfg, scope=scope, chain=chain, candidate=candidate, category=sort.category,
+                conn, judge, cfg, scope=scope, chain=chain, candidate=candidate, category=sort.category,
                 embedding=embedding, observed_at=ingest["observed_at"], considered=trace["neighbors"],
             )
             plan = plan_from(verdicts, cfg, scope, candidate, ingest["id"])
-            entities = await plan_entities(conn, ctx.judge, cfg, scope=scope, candidate=candidate,
+            entities = await plan_entities(conn, judge, cfg, scope=scope, candidate=candidate,
                                            vectors=name_vectors, ingest_id=ingest["id"])
         plan.fetched_at = fetched_at
         trace["reconcile_ms"] = int((time.perf_counter() - started) * 1000)

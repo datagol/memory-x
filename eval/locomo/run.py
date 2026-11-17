@@ -33,6 +33,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from eval import bench_dsn
 from memx import Memory, MemxConfig, Messages, Turn
 from memx.providers.http import OpenRouterHTTP
 
@@ -213,7 +214,7 @@ async def run_config(args: argparse.Namespace, data: list[dict], run_id: str, cf
     previous = [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []
     done = {(r["sample_id"], r["index"]) for r in previous}
 
-    mem = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline", **spec.get("memx", {})),
+    mem = await Memory.connect(MemxConfig(dsn=bench_dsn(args.dsn), insert_mode="inline", **spec.get("memx", {})),
                                start_runner=False)
     http = OpenRouterHTTP(mem.ctx.config.api_key(), mem.ctx.config.openrouter_base_url, timeout_s=120)
     sem = asyncio.Semaphore(args.concurrency)

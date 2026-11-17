@@ -126,7 +126,7 @@ async def client(make_memory):
     mem = await make_memory(extractor=SentenceExtractor(hints={"likes": "preference"}), api_token="secret")
     app.state.memory = mem
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test",
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost",
                                  headers={"Authorization": "Bearer secret"}) as c:
         yield c
 
@@ -168,7 +168,7 @@ async def test_api_reports_provider_refusal_clearly(make_memory):
                                 retryable=False, status=403)
 
     app.state.memory = await make_memory(extractor=Refusing())
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as c:
         r = await c.post(f"/v1/scopes/{SCOPE}/ingests",
                          json={"input": {"kind": "text", "text": "The user likes tea."}, "mode": "inline"})
     assert r.status_code == 502
@@ -192,3 +192,33 @@ async def test_resending_abandoned_ingest_resumes_it(make_memory):
         await conn.execute("UPDATE memx_job SET locked_at = now() - interval '1 hour'")
     receipt = await mem.insert(SCOPE, say("The user likes tea."), idempotency_key="lost")
     assert receipt.status == "committed" and receipt.added == 1
+
+
+async def test_api_requires_the_token_and_bounds_its_inputs(client):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as anon:
+        assert (await anon.get(f"/v1/scopes/{SCOPE}/facts")).status_code == 401
+        wrong = await anon.get(f"/v1/scopes/{SCOPE}/facts", headers={"Authorization": "Bearer nope"})
+        assert wrong.status_code == 401
+        assert (await anon.get("/healthz")).status_code == 200
+    assert (await client.get(f"/v1/scopes/{SCOPE}/facts")).status_code == 200
+    assert (await client.get(f"/v1/scopes/{SCOPE}/facts", params={"offset": -1})).status_code == 422
+    assert (await client.get(f"/v1/scopes/{SCOPE}/facts", params={"limit": 0})).status_code == 422
+    assert (await client.post(f"/v1/scopes/{SCOPE}/recall", json={"budget_tokens": 10**9})).status_code == 422
+    assert (await client.post(f"/v1/scopes/{SCOPE}/recall", json={"query": "x" * 20_001})).status_code == 422
+
+
+async def test_api_fact_routes(client):
+    body = {"input": {"kind": "messages", "turns": [{"role": "user", "content": "The user likes tea."}]},
+            "mode": "inline"}
+    child = f"{SCOPE}.agent1"
+    fact = (await client.post(f"/v1/scopes/{child}/ingests", json=body)).json()["facts"][0]
+    assert (await client.get(f"/v1/facts/{fact['id']}")).json()["text"] == fact["text"]
+    edited = await client.patch(f"/v1/facts/{fact['id']}", json={"category": "rule", "changed_by": "test"})
+    assert edited.status_code == 200 and edited.json()["category"] == "rule"
+    refused = await client.post(f"/v1/facts/{fact['id']}/promote", json={"to_scope": "memory.elsewhere"})
+    assert refused.status_code == 422
+    promoted = await client.post(f"/v1/facts/{fact['id']}/promote", json={"to_scope": SCOPE})
+    assert promoted.status_code == 200 and promoted.json()["scope"] == SCOPE
+    gone = await client.delete(f"/v1/scopes/{SCOPE}", headers={"X-Requested-By": "test"})
+    assert gone.status_code == 200 and gone.json()["facts_removed"] >= 1
+    assert (await client.get(f"/v1/facts/{promoted.json()['id']}")).status_code == 404

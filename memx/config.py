@@ -66,7 +66,7 @@ class MemxConfig(BaseSettings):
     window_max_candidates: int = 25
     extract_concurrency: int = 4
     jev_concurrency: int = 8
-    max_fact_chars: int = 600
+    max_fact_chars: int = Field(default=600, le=600)  # the fact table stores at most 600 characters
     user_trust: float = 1.0
     assistant_trust: float = 0.6
     default_text_trust: float = 0.8
@@ -162,6 +162,8 @@ class MemxConfig(BaseSettings):
     expired_retention_days: int = 30
     decision_retention_days: int = 180
     done_job_retention_days: int = 7
+    # Recall logs hold every candidate's text for the dashboard's explanation view; 0 keeps them for ever.
+    recall_log_retention_days: int = 90
 
     # Jobs
     worker_concurrency: int = 4

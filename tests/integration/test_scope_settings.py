@@ -61,7 +61,7 @@ async def test_event_ttl_comes_from_the_scope(make_memory):
 
 async def test_settings_api(make_memory):
     app.state.memory = await make_memory()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as c:
         r = await c.patch("/v1/scopes/memory.acme/settings", json={"walk_enabled": False, "budget_tokens": 1200})
         assert r.status_code == 200 and r.json()["own"] == {"walk_enabled": False, "budget_tokens": 1200}
         r = await c.get("/v1/scopes/memory.acme.alex/settings")

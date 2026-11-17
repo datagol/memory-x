@@ -10,6 +10,11 @@ import pytest
 from memx import Memory, MemxConfig
 from memx.testing import FakeJudge, HashEmbedder, SentenceExtractor
 
+if not os.environ.get("MEMX_LIVE"):
+    # Tests must behave the same on every machine: do not pick up settings from the developer's .env. The opt-in
+    # live tests are the exception, since that is where their API key lives.
+    MemxConfig.model_config["env_file"] = None
+
 ADMIN_DSN = os.environ.get("MEMX_TEST_ADMIN_DSN", "postgresql://memx:memx@localhost:5433/memx")
 TEST_DB = "memx_test"
 TABLES = ("memx_fact_entity, memx_entity, memx_fact_link, memx_fact, memx_ingest, memx_scope, memx_decision, "
@@ -28,6 +33,8 @@ async def test_dsn() -> AsyncIterator[str]:
             await conn.execute(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)")
             await conn.execute(f"CREATE DATABASE {TEST_DB}")
     except psycopg.OperationalError as exc:
+        if os.environ.get("CI"):  # a CI run without its database must not pass by skipping most of the suite
+            pytest.fail(f"Postgres not available at {ADMIN_DSN}: {exc}")
         pytest.skip(f"Postgres not available at {ADMIN_DSN}: {exc}")
     yield _test_dsn()
 

@@ -6,6 +6,7 @@ or cut). It is stored in ``memx_recall_log.explain`` and returned when ``explain
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from datetime import UTC, datetime
@@ -14,13 +15,16 @@ from typing import Any
 from memx import scope_settings
 from memx.context import Context
 from memx.db import repo
-from memx.recall.decay import access_factor, final_score, freshness, priority
+from memx.db.pool import Borrowed
+from memx.recall.decay import factors, final_score, priority
 from memx.recall.grade import GRADE_VERSION, grade
 from memx.recall.render import render
 from memx.recall.walk import Reached, walk
 from memx.scopes import ScopePath
 from memx.tokens import estimate_tokens
 from memx.types import Category, Fact, PathStep, Recall, RecallMode, ScoredFact, Turn
+
+log = logging.getLogger("memx.recall")
 
 # Title line plus a header for every possible section.
 RENDER_OVERHEAD_TOKENS = 48
@@ -53,13 +57,7 @@ def _path_json(path: list[PathStep]) -> list[dict[str, str]]:
 
 
 def _components(fact: Fact, now: datetime, cfg) -> dict[str, float]:
-    fresh = freshness(fact, now, cfg.half_lives)
-    return {
-        "freshness": round(fresh, 4),
-        "freshness_factor": round(0.6 + 0.4 * fresh, 4),
-        "trust_factor": round(0.5 + 0.5 * fact.trust, 4),
-        "access_factor": round(access_factor(fact.access_count, cfg.access_boost_cap), 4),
-    }
+    return {name: round(value, 4) for name, value in factors(fact, now, cfg).items()}
 
 
 async def recall(
@@ -81,8 +79,9 @@ async def recall(
     why: dict[str, str] = {}
     candidates: list[dict[str, Any]] = []
     history_p: float | None = 1.0 if cfg.history_in_recall == "always" else None
+    grade_error: str | None = None
 
-    async with ctx.pool.connection() as conn:
+    async with Borrowed(ctx.pool) as conn:  # handed back to the pool during the embed and grade calls
         settings = await scope_settings.resolve(conn, cfg, scope)
         budget = budget_tokens or settings["budget_tokens"]
         limit = budget * cfg.budget_safety
@@ -120,7 +119,8 @@ async def recall(
             walk_info: dict[str, Any] | None = None
         else:
             t = time.perf_counter()
-            q_emb = (await ctx.embedder.embed([query]))[0]
+            async with conn.released():
+                q_emb = (await ctx.embedder.embed([query]))[0]
             timings["embed_ms"] = int((time.perf_counter() - t) * 1000)
             t = time.perf_counter()
             rows = await repo.hybrid_candidates(
@@ -186,21 +186,29 @@ async def recall(
             walked = {r.fact.id: r for r in expanded}
 
             t = time.perf_counter()
+            graded = False
             if cfg.grade_enabled and facts:
-                searched = {i for i, f in enumerate(facts) if f.id in info and i in paths}
-                relevance, res = await grade(ctx.judge, query, recent_turns, facts, scope, now, paths, both=searched,
-                                             ask_history=cfg.history_in_recall == "when_asked")
-                if "history" in res.answers:
-                    history_p = float(res.answers["history"].get("noul", 0.0))
-                decisions.append({
-                    "step": "grade", "question_version": GRADE_VERSION, "recall_id": recall_id, "scope": scope,
-                    "latency_ms": res.latency_ms,
-                    "result": {"query": query, "scores": {str(f.id): r for f, r in zip(facts, relevance)},
-                               "walked": [str(i) for i in walked], "asks_history": history_p},
-                })
-                levels = {str(f.id): res.answers[f"f{i}"].get("probabilities") for i, f in enumerate(facts)}
-                link_won = {str(f.id): res.answers[f"f{i}"].get("via_link", False) for i, f in enumerate(facts)}
-            else:
+                try:
+                    searched = {i for i, f in enumerate(facts) if f.id in info and i in paths}
+                    relevance, res = await grade(conn.judge(ctx.judge), query, recent_turns, facts, scope, now, paths, both=searched,
+                                                 ask_history=cfg.history_in_recall == "when_asked")
+                    if "history" in res.answers:
+                        history_p = float(res.answers["history"].get("noul", 0.0))
+                    decisions.append({
+                        "step": "grade", "question_version": GRADE_VERSION, "recall_id": recall_id, "scope": scope,
+                        "latency_ms": res.latency_ms,
+                        "result": {"query": query, "scores": {str(f.id): r for f, r in zip(facts, relevance)},
+                                   "walked": [str(i) for i in walked], "asks_history": history_p},
+                    })
+                    levels = {str(f.id): res.answers[f"f{i}"].get("probabilities") for i, f in enumerate(facts)}
+                    link_won = {str(f.id): res.answers[f"f{i}"].get("via_link", False) for i, f in enumerate(facts)}
+                    graded = True
+                except Exception as exc:  # noqa: BLE001 - the judge is down or answered unreadably
+                    # Search order is a worse ranking than the judge's, but a usable one; failing the recall would
+                    # leave the agent with no memory at all.
+                    grade_error = f"{type(exc).__name__}: {exc}"[:300]
+                    log.warning("recall %s: grading failed, ranking by search order: %s", recall_id, grade_error)
+            if not graded:
                 top = max((r["rrf"] for r in graded_rows), default=1.0)
                 relevance = [r["rrf"] / top for r in graded_rows] + [w.score for w in expanded]
                 levels = {}
@@ -288,6 +296,7 @@ async def recall(
             "walk": walk_info, "walk_score_factor": cfg.walk_score_factor, "walk_grade_floor": cfg.walk_grade_floor,
             "asks_history": history_p, "history": {str(k): [str(o.id) for o in v] for k, v in history.items()},
             "candidates": candidates,
+            **({"grade_error": grade_error} if grade_error else {}),
         }
         async with conn.transaction():
             await repo.mark_accessed(conn, ids)

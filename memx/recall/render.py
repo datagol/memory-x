@@ -50,8 +50,13 @@ def _groups(facts: list[Fact], related: list[tuple[UUID, UUID]], key) -> list[li
     return groups
 
 
+def _flat(text: str) -> str:
+    """One line per fact: a fact's own newlines must not be able to start a heading or a new list item."""
+    return " ".join(text.split())
+
+
 def _line(fact: Fact, show_scope: bool, leaf: str, dated: bool = False) -> str:
-    text = fact.text
+    text = _flat(fact.text)
     if fact.category == Category.event and not _DATED.search(text):
         # Most event facts already name their date ("on 2023-05-20", "in June 2023"); prefix only the ones that don't.
         when = fact.event_at or fact.observed_at
@@ -65,7 +70,7 @@ def _line(fact: Fact, show_scope: bool, leaf: str, dated: bool = False) -> str:
 
 
 def history_line(old: Fact) -> str:
-    return f"earlier, later replaced: {old.text} (said {old.observed_at.strftime('%Y-%m-%d')})"
+    return f"earlier, later replaced: {_flat(old.text)} (said {old.observed_at.strftime('%Y-%m-%d')})"
 
 
 def render(scope: str, facts: list[Fact], related: list[tuple[UUID, UUID]], *, now: datetime, cfg: MemxConfig,

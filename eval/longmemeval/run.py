@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from eval import bench_dsn
 from memx import Memory, Messages, MemxConfig, Turn
 from memx.providers.http import OpenRouterHTTP
 
@@ -281,7 +282,7 @@ async def main_async(args) -> None:
         todo = [i for i in chosen if i["question_id"] not in answered]
         spec = CONFIGS[cfg_name]
         overrides = {**({"extractor_model": args.extract_model} if args.extract_model else {}), **spec.get("memx", {})}
-        mem = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline", **overrides), start_runner=False)
+        mem = await Memory.connect(MemxConfig(dsn=bench_dsn(args.dsn), insert_mode="inline", **overrides), start_runner=False)
         http = OpenRouterHTTP(mem.ctx.config.api_key(), mem.ctx.config.openrouter_base_url, timeout_s=120)
         sem = asyncio.Semaphore(args.concurrency)
 

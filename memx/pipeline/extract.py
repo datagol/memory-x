@@ -6,6 +6,7 @@ import asyncio
 from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 from pydantic import TypeAdapter
 
 from memx import usage as usage_tracker
@@ -13,7 +14,7 @@ from memx.context import Context
 from memx.db import repo
 from memx.jobs.queue import Deferred
 from memx.pipeline.gate import GATE_VERSION, gate_window
-from memx.pipeline.similarity import cosine, lexical_guard, text_hash
+from memx.pipeline.similarity import lexical_guard, text_hash
 from memx.pipeline.windowing import Window, can_split, make_windows, split_window
 from memx.providers.extractor import MAX_FACTS
 from memx.providers.http import ProviderError
@@ -256,21 +257,30 @@ def to_candidates(raw: list[dict[str, Any]]) -> list[Candidate]:
 def dedupe_within(candidates: list[Candidate], embeddings: list[list[float]], band_high: float,
                   min_jaccard: float) -> tuple[list[Candidate], list[list[float]]]:
     """Collapse repeats across overlapping windows before anything touches stored memory."""
+    if not candidates:
+        return [], []
     kept: list[Candidate] = []
     kept_emb: list[list[float]] = []
     hashes: set[bytes] = set()
-    for cand, emb in zip(candidates, embeddings):
+    # Unit vectors of the kept candidates, so one matrix product gives a candidate's cosine with all of them. A long
+    # document yields a thousand candidates; comparing them pair by pair in Python took minutes on the event loop.
+    unit = np.asarray(embeddings, dtype=np.float64).reshape(len(embeddings), -1)
+    norms = np.linalg.norm(unit, axis=1, keepdims=True)
+    unit = np.divide(unit, norms, out=np.zeros_like(unit), where=norms > 0)
+    kept_unit = np.empty_like(unit)
+    for i, (cand, emb) in enumerate(zip(candidates, embeddings)):
         digest = text_hash(cand.text)
         if digest in hashes:
             continue
-        twin = next((k for k, other in zip(kept, kept_emb)
-                     if cosine(emb, other) >= band_high and lexical_guard(cand.text, k.text, min_jaccard)), None)
+        close = np.flatnonzero(kept_unit[: len(kept)] @ unit[i] >= band_high)
+        twin = next((kept[j] for j in close if lexical_guard(cand.text, kept[j].text, min_jaccard)), None)
         if twin is not None:
             # The survivor keeps every entity either spelling mentioned.
             known = {e.name.lower() for e in twin.entities}
             twin.entities += [e for e in cand.entities if e.name.lower() not in known]
             continue
         hashes.add(digest)
+        kept_unit[len(kept)] = unit[i]
         kept.append(cand)
         kept_emb.append(emb)
     for i, cand in enumerate(kept):

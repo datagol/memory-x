@@ -72,13 +72,13 @@ async def config(mem: Mem) -> dict[str, Any]:
 
 
 @router.get("/entities")
-async def entities(mem: Mem, scope: str, view: str = "subtree", limit: Annotated[int, Query(le=2000)] = 200) -> list[dict]:
+async def entities(mem: Mem, scope: str, view: str = "subtree", limit: Annotated[int, Query(ge=1, le=2000)] = 200) -> list[dict]:
     rows = await mem.entities(scope, view="chain" if view == "chain" else "subtree", limit=limit)
     return [{**r, "id": str(r["id"])} for r in rows]
 
 
 @router.get("/scopes")
-async def scopes(mem: Mem, prefix: str | None = None, limit: Annotated[int, Query(le=5000)] = 2000) -> list[dict]:
+async def scopes(mem: Mem, prefix: str | None = None, limit: Annotated[int, Query(ge=1, le=5000)] = 2000) -> list[dict]:
     async with mem.ctx.pool.connection() as conn:
         return await repo.list_scopes(conn, _scope(prefix), limit)
 
@@ -92,8 +92,8 @@ async def stats(mem: Mem, scope: str | None = None) -> dict[str, Any]:
 
 
 @router.get("/ingests")
-async def ingests(mem: Mem, scope: str | None = None, limit: Annotated[int, Query(le=500)] = 50,
-                  offset: int = 0) -> list[dict[str, Any]]:
+async def ingests(mem: Mem, scope: str | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 50,
+                  offset: Annotated[int, Query(ge=0)] = 0) -> list[dict[str, Any]]:
     async with mem.ctx.pool.connection() as conn:
         rows = await repo.list_ingests(conn, _scope(scope), limit, offset)
     for r in rows:
@@ -139,8 +139,8 @@ async def ingest_trace(ingest_id: UUID, mem: Mem) -> dict[str, Any]:
 
 
 @router.get("/recalls")
-async def recalls(mem: Mem, scope: str | None = None, limit: Annotated[int, Query(le=500)] = 50,
-                  offset: int = 0) -> list[dict[str, Any]]:
+async def recalls(mem: Mem, scope: str | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 50,
+                  offset: Annotated[int, Query(ge=0)] = 0) -> list[dict[str, Any]]:
     async with mem.ctx.pool.connection() as conn:
         return await repo.list_recalls(conn, _scope(scope), limit, offset)
 
@@ -161,7 +161,7 @@ async def recall_detail(recall_id: UUID, mem: Mem) -> dict[str, Any]:
 
 @router.get("/graph")
 async def graph(mem: Mem, scope: str, view: str = "chain", include_superseded: bool = True,
-                include_expired: bool = False, limit: Annotated[int, Query(le=2000)] = 400) -> dict[str, Any]:
+                include_expired: bool = False, limit: Annotated[int, Query(ge=1, le=2000)] = 400) -> dict[str, Any]:
     path = str(ScopePath.parse(scope))
     statuses = ["active"] + (["superseded"] if include_superseded else []) + (["expired"] if include_expired else [])
     async with mem.ctx.pool.connection() as conn:
@@ -201,6 +201,6 @@ async def graph(mem: Mem, scope: str, view: str = "chain", include_superseded: b
 
 
 @router.get("/jobs")
-async def jobs(mem: Mem, status: str | None = None, limit: Annotated[int, Query(le=500)] = 50) -> list[dict]:
+async def jobs(mem: Mem, status: str | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 50) -> list[dict]:
     async with mem.ctx.pool.connection() as conn:
         return await repo.list_jobs(conn, status, limit)

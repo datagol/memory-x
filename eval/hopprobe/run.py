@@ -17,6 +17,7 @@ from pathlib import Path
 
 from eval.hopprobe import fixtures as fx
 from eval.longmemeval.run import ANSWER_PROMPT, DATA, chat
+from eval import bench_dsn
 from memx import Memory, MemxConfig, Messages, Text, Turn
 from memx.providers.http import OpenRouterHTTP
 
@@ -48,7 +49,7 @@ def mcnemar(a: list[bool], b: list[bool]) -> dict:
 
 async def main_async(args) -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
-    base = MemxConfig(dsn=args.dsn, insert_mode="inline", extractor_model=args.extract_model)
+    base = MemxConfig(dsn=bench_dsn(args.dsn), insert_mode="inline", extractor_model=args.extract_model)
     mem = await Memory.connect(base, start_runner=False)
     t = time.perf_counter()
     await ingest(mem)
@@ -57,7 +58,7 @@ async def main_async(args) -> None:
     http = OpenRouterHTTP(base.api_key(), base.openrouter_base_url, timeout_s=120)
     scored: dict[str, list[bool]] = {}
     for name, overrides in CONFIGS.items():
-        m = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline", **overrides), start_runner=False,
+        m = await Memory.connect(MemxConfig(dsn=bench_dsn(args.dsn), insert_mode="inline", **overrides), start_runner=False,
                                  run_migrations=False)
         rows = []
         for q in fx.questions():

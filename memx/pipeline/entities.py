@@ -34,6 +34,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from memx.scopes import ScopePath
 from memx.config import MemxConfig
 from memx.db import repo
 from memx.providers.jev import UNTRUSTED_NOTE, Choice, Judge, clip, envelope
@@ -112,7 +113,7 @@ def is_description(name: str) -> bool:
     ("the data platform team") stay, because facts about who owns what connect through them."""
     words = name.split()
     return (name == name.lower() and len(words) >= 3 and words[0] in ("the", "a", "an", "our", "my", "their")
-            and not words[-1].rstrip("s") in _GROUP_WORDS)
+            and words[-1].rstrip("s") not in _GROUP_WORDS)
 
 
 def tokens_subset(a: str, b: str) -> bool:
@@ -123,10 +124,8 @@ def tokens_subset(a: str, b: str) -> bool:
 
 
 def tenant_of(scope: str) -> str:
-    """The label under the root (`company_2` in `memory.company_2.user_3`). Entities are shared within a tenant and
-    never across tenants. Every scope starts with the same root, so the root itself cannot be the tenant."""
-    labels = scope.split(".")
-    return labels[1] if len(labels) > 1 else labels[0]
+    """The entity namespace a scope belongs to; see ``ScopePath.tenant``."""
+    return ScopePath.parse(scope).tenant
 
 
 def ambiguous_identical(norm: str, mention_type: str, known: dict[str, Any]) -> bool:
@@ -431,26 +430,28 @@ async def reresolve(conn: AsyncConnection, judge: Judge, cfg: MemxConfig, tenant
     answers, latency = await ask_merges(conn, judge, asks)
     report = []
     gone: set[Any] = set()
-    for ask, ans in zip(asks, answers):
-        merged = ans["p_same"] >= cfg.entity_merge_min
-        a = by_id[ask.short_id]
-        b = ask.other
-        if merged and a["id"] not in gone and b["id"] not in gone:
-            counts = await repo.entity_fact_counts(conn, [a["id"], b["id"]])
-            keep, fold = (b, a) if (counts.get(b["id"], 0), len(b["name"])) >= (counts.get(a["id"], 0), len(a["name"])) else (a, b)
-            await repo.merge_entity(conn, fold["id"], keep["id"])
-            gone.add(fold["id"])
-            report.append({"short": fold["name"], "into": keep["name"], "how": ask.how,
-                           "p_same": round(ans["p_same"], 4), "merged": True})
-        else:
-            report.append({"short": ask.short, "into": b["name"], "how": ask.how,
-                           "p_same": round(ans["p_same"], 4), "merged": False})
-    if report:
-        await repo.add_decisions(conn, [{
-            "step": "entity", "question_version": ENTITY_VERSION, "scope": tenant, "latency_ms": latency,
-            "result": {"name": r["short"], "with": r["into"], "p_same": r["p_same"], "how": r["how"],
-                       "action": "alias" if r["merged"] else "create", "reresolve": True},
-        } for r in report])
+    async with conn.transaction():  # the merges of one pass land together or not at all
+        await repo.lock_entities(conn, tenant)
+        for ask, ans in zip(asks, answers):
+            merged = ans["p_same"] >= cfg.entity_merge_min
+            a = by_id[ask.short_id]
+            b = ask.other
+            if merged and a["id"] not in gone and b["id"] not in gone:
+                counts = await repo.entity_fact_counts(conn, [a["id"], b["id"]])
+                keep, fold = (b, a) if (counts.get(b["id"], 0), len(b["name"])) >= (counts.get(a["id"], 0), len(a["name"])) else (a, b)
+                await repo.merge_entity(conn, fold["id"], keep["id"])
+                gone.add(fold["id"])
+                report.append({"short": fold["name"], "into": keep["name"], "how": ask.how,
+                               "p_same": round(ans["p_same"], 4), "merged": True})
+            else:
+                report.append({"short": ask.short, "into": b["name"], "how": ask.how,
+                               "p_same": round(ans["p_same"], 4), "merged": False})
+        if report:
+            await repo.add_decisions(conn, [{
+                "step": "entity", "question_version": ENTITY_VERSION, "scope": tenant, "latency_ms": latency,
+                "result": {"name": r["short"], "with": r["into"], "p_same": r["p_same"], "how": r["how"],
+                           "action": "alias" if r["merged"] else "create", "reresolve": True},
+            } for r in report])
     return report
 
 

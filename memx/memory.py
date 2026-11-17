@@ -16,7 +16,7 @@ from memx.config import InsertMode, MemxConfig
 from memx.context import Context
 from memx.db import repo
 from memx.db.migrate import migrate
-from memx.db.pool import open_pool
+from memx.db.pool import Borrowed, open_pool
 from memx.export.okf import build_bundle
 from memx.jobs import queue
 from memx.jobs.runner import JobRunner
@@ -72,8 +72,10 @@ def _input_chars(inp: Messages | Text) -> int:
 
 
 def _default_key(scope: str, payload: dict[str, Any], observed_at: datetime | None) -> str:
+    """The same input at the same scope and moment is one ingest. With no ``observed_at`` the moment is today, so a
+    resend the same day is ignored while the same statement on a later day counts as said again and reinforces."""
     blob = json.dumps({"scope": scope, "payload": payload,
-                       "observed_at": observed_at.isoformat() if observed_at else None},
+                       "observed_at": observed_at.isoformat() if observed_at else f"day:{datetime.now(UTC):%Y-%m-%d}"},
                       sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(blob.encode()).hexdigest()
 
@@ -95,6 +97,10 @@ class Memory:
         cfg = config or MemxConfig()
         if run_migrations:
             await migrate(cfg.dsn, cfg.embedding_dim)
+        if cfg.providers == "demo" and extractor is None and embedder is None and judge is None:
+            from memx.testing import demo_providers  # stand-in models: no key, no network
+
+            extractor, embedder, judge = demo_providers(cfg.embedding_dim)
         pool = await open_pool(cfg.dsn, cfg.pool_min, cfg.pool_max)
         http = None
         if extractor is None or embedder is None or judge is None:
@@ -183,8 +189,10 @@ class Memory:
             return await self.receipt(ingest_id, with_facts=mode == "inline")
         if mode == "inline":
             try:
-                await run_ingest(self.ctx, ingest_id, allow_batch=False)
-            except Exception as exc:
+                # The job row is marked running so no worker takes it; renew its lease while this call works on it.
+                async with queue.keeping_lease(self.ctx.pool, f"ingest:{ingest_id}", cfg.job_lease_seconds):
+                    await run_ingest(self.ctx, ingest_id, allow_batch=False)
+            except (Exception, asyncio.CancelledError) as exc:  # a cancelled call must not leave the job running
                 async with self.ctx.pool.connection() as conn:
                     await conn.execute(
                         "UPDATE memx_job SET status = 'dead', finished_at = now(), last_error = %s "
@@ -267,7 +275,7 @@ class Memory:
                     report["revived"] += revive
                     continue
                 async with conn.transaction():
-                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (row["scope"],))
+                    await repo.lock_scope(conn, row["scope"])
                     ok = await repo.set_event_expiry(conn, row["id"], new, revive)
                 if revive and ok:
                     report["revived"] += 1
@@ -326,17 +334,23 @@ class Memory:
         Runs over every tenant unless one is given."""
         from memx.pipeline.entities import reresolve
 
-        async with self.ctx.pool.connection() as conn:
+        async with Borrowed(self.ctx.pool) as conn:
             if tenant is None:
                 cur = await conn.execute("SELECT DISTINCT tenant FROM memx_entity ORDER BY tenant")
                 tenants = [r["tenant"] for r in await cur.fetchall()]
             else:
                 tenants = [tenant]
+
+            async def embed(names: list[str]) -> list[list[float]]:
+                async with conn.released():
+                    return await self.ctx.embedder.embed(names)
+
             report: list[dict[str, Any]] = []
             for t in tenants:
-                async with conn.transaction():
-                    report += [{"tenant": t, **row} for row in await reresolve(
-                        conn, self.ctx.judge, self.ctx.config, t, embed=self.ctx.embedder.embed)]
+                # No transaction around the whole pass: it would keep entity rows locked through the model calls.
+                # reresolve applies its merges in one of its own.
+                report += [{"tenant": t, **row} for row in await reresolve(
+                    conn, conn.judge(self.ctx.judge), self.ctx.config, t, embed=embed)]
             return report
 
     async def rereconcile(self, scope: str | None = None, *, dry_run: bool = False):
@@ -360,8 +374,9 @@ class Memory:
             if not ids:
                 raise NotFound(f"fact {fact_id} not found")
             facts = await repo.attach_entities(conn, await repo.facts_by_ids(conn, ids))
-            decisions = await repo.decisions_for(conn, ids)
-            links = await repo.links_for(conn, ids)
+            scope = next(f.scope for f in facts if f.id == fact_id)
+            decisions = await repo.decisions_for(conn, ids, within=scope)
+            links = await repo.links_for(conn, ids, within=scope)
         entries = []
         for fact in facts:
             mine = [
@@ -419,7 +434,7 @@ class Memory:
                 raise ValueError("only active facts can be edited")
             changes: list[dict[str, Any]] = []
             async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (fact.scope,))
+                await repo.lock_scope(conn, fact.scope)
                 if category is not None and category != fact.category:
                     stale_after = None
                     if category == Category.event and fact.event_at and fact.event_at.date() >= fact.observed_at.date():
@@ -437,6 +452,8 @@ class Memory:
                     )
                     changes.append({"change": "topic", "from": fact.topic, "to": topic})
                 tenant = ScopePath.parse(fact.scope).tenant
+                if add_entities or remove_entity_ids:
+                    await repo.lock_entities(conn, tenant)
                 current = {e["id"]: e for e in (await repo.entities_for_facts(conn, [fact_id])).get(fact_id, [])}
                 for entity_id in remove_entity_ids or []:
                     if entity_id in current:
@@ -474,6 +491,9 @@ class Memory:
                 raise ValueError("only active facts can be promoted")
             if fact.scope == target:
                 return fact
+            if not ScopePath.parse(target).is_ancestor_of(ScopePath.parse(fact.scope)):
+                raise ValueError(f"a fact can only be promoted to a broader scope of its own: {target} is not above "
+                                 f"{fact.scope}")
             embedding = await repo.get_fact_embedding(conn, fact_id)
             cur = await conn.execute("SELECT attrs->>'attribute' AS attribute FROM memx_fact WHERE id = %s", (fact_id,))
             attribute = (await cur.fetchone())["attribute"]
@@ -487,7 +507,7 @@ class Memory:
                                              observed_at=fact.observed_at)
             plan = plan_from(verdicts, cfg, target, candidate)
             async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (target,))
+                await repo.lock_scope(conn, target)
                 if plan.action == "drop":
                     new_id = plan.reinforce
                     await repo.reinforce(conn, new_id, fact.observed_at)
@@ -536,7 +556,7 @@ class Memory:
         async with self.ctx.pool.connection() as conn:
             rows = await repo.subtree_facts(conn, path)
             links = await repo.links_for(conn, [r["id"] for r in rows])
-        data = build_bundle(path, rows, links)
+        data = await asyncio.to_thread(build_bundle, path, rows, links)
         if dest is not None:
             dest.write(data)
         return data, ExportReport(files=len(rows) + 1, scope=path)
@@ -549,6 +569,7 @@ class Memory:
                     conn, expired_retention_days=cfg.expired_retention_days,
                     decision_retention_days=cfg.decision_retention_days,
                     done_job_retention_days=cfg.done_job_retention_days,
+                    recall_log_retention_days=cfg.recall_log_retention_days,
                 )
         return SweepReport(**counts)
 

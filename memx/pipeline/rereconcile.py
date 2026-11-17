@@ -192,7 +192,7 @@ async def rereconcile(conn: AsyncConnection, cfg: MemxConfig, *, scope: str | No
                 report.unshadowed += kind == "shadow"
                 continue
             async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (row["f_scope"],))
+                await repo.lock_scope(conn, row["f_scope"])
                 if kind == "supersede":
                     cur2 = await conn.execute(
                         "UPDATE memx_fact f SET status = 'active', superseded_by = NULL, superseded_at = NULL "

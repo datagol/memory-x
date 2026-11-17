@@ -114,7 +114,9 @@ async def commit_candidate(
     entities = entities or []
     tenant = tenant_of(scope)
     async with conn.transaction():
-        await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (scope,))
+        await repo.lock_scope(conn, scope)
+        if entities:
+            await repo.lock_entities(conn, tenant)
         plan = await _recheck(conn, cfg, plan, chain=chain, scope=scope, candidate=candidate, embedding=embedding)
 
         outcome["verdicts"] = [

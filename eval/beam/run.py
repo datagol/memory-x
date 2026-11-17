@@ -38,8 +38,8 @@ import time  # noqa: E402
 from collections import defaultdict  # noqa: E402
 from datetime import UTC, datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any  # noqa: E402
 
+from eval import bench_dsn
 from memx import Memory, Messages, MemxConfig, Turn  # noqa: E402
 from memx.providers.http import OpenRouterHTTP  # noqa: E402
 
@@ -153,7 +153,7 @@ class MemxSystem(System):
     async def _mem(self) -> Memory:
         async with self.lock:
             if self.mem is None:
-                self.mem = await Memory.connect(MemxConfig(dsn=DSN, insert_mode="inline",
+                self.mem = await Memory.connect(MemxConfig(dsn=bench_dsn(DSN), insert_mode="inline",
                                                            extractor_model=self.args.extract_model),
                                                 start_runner=False)
         return self.mem
@@ -188,7 +188,7 @@ class Mem0System(System):
 
         from eval.longmemeval.run_mem0 import mem0_config
 
-        cfg = MemxConfig(dsn=DSN)
+        cfg = MemxConfig(dsn=bench_dsn(DSN))
         conf = mem0_config(cfg, args.extract_model)
         conf["vector_store"]["config"]["collection_name"] = "mem0_beam"
         conf["history_db_path"] = str(RESULTS / "mem0_beam_history.db")

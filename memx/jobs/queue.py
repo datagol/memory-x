@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
 import random
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
@@ -10,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 CHANNEL = "memx_jobs"
+log = logging.getLogger("memx.jobs")
 
 
 class Deferred(Exception):
@@ -97,13 +103,58 @@ async def defer(conn: AsyncConnection, job_id: int, seconds: float) -> None:
     )
 
 
+async def heartbeat(conn: AsyncConnection, key: str) -> None:
+    """Renew a running job's lease. Whoever runs a job calls this while it works, so a long job is not taken for a
+    crashed one and started a second time."""
+    await conn.execute(
+        "UPDATE memx_job SET locked_at = now() WHERE idempotency_key = %s AND status = 'running'", (key,)
+    )
+
+
+@asynccontextmanager
+async def keeping_lease(pool: Any, key: str, lease_seconds: float) -> AsyncIterator[None]:
+    """Renew the job's lease every third of it for as long as the body runs."""
+    async def beat() -> None:
+        while True:
+            await asyncio.sleep(max(lease_seconds / 3, 0.05))
+            try:
+                async with pool.connection() as conn:
+                    await heartbeat(conn, key)
+            except Exception:  # noqa: BLE001 - a missed beat is recoverable; the next one renews the lease
+                log.warning("could not renew the lease of job %s", key, exc_info=True)
+
+    task = asyncio.create_task(beat(), name=f"memx-lease-{key}")
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def bury_expired(conn: AsyncConnection) -> list[dict[str, Any]]:
+    """Mark dead the jobs whose lease expired on their last attempt. A job that kills its worker every time (out of
+    memory, say) would otherwise be requeued for ever."""
+    cur = await conn.execute(
+        """
+        UPDATE memx_job SET status = 'dead', finished_at = now(),
+               last_error = coalesce(last_error, 'lease expired') || ' (gave up after ' || attempts || ' attempts)'
+         WHERE status = 'running' AND locked_at + make_interval(secs => lease_seconds) < now()
+           AND attempts >= max_attempts
+        RETURNING id, kind, payload, last_error
+        """
+    )
+    return await cur.fetchall()
+
+
 async def reap(conn: AsyncConnection) -> int:
-    """Requeue running jobs whose lease expired (worker crashed or was killed)."""
+    """Requeue running jobs whose lease expired (worker crashed or was killed) and that have attempts left."""
     cur = await conn.execute(
         """
         UPDATE memx_job SET status = 'queued', locked_at = NULL, locked_by = NULL, run_after = now(),
                last_error = coalesce(last_error, 'lease expired')
          WHERE status = 'running' AND locked_at + make_interval(secs => lease_seconds) < now()
+           AND attempts < max_attempts
         RETURNING id
         """
     )

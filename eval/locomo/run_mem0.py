@@ -39,6 +39,7 @@ from eval.locomo.run import (
     turn_text,
 )
 from eval.longmemeval.run_mem0 import USAGE, mem0_config
+from eval import bench_dsn
 from memx import MemxConfig
 from memx.providers.http import OpenRouterHTTP
 
@@ -89,7 +90,7 @@ def render(by_speaker: dict[str, list[dict]]) -> str:
 
 async def main_async(args: argparse.Namespace) -> None:
     data = load()[: args.conversations or None]
-    cfg = MemxConfig(dsn=args.dsn)
+    cfg = MemxConfig(dsn=bench_dsn(args.dsn))
     mem = AsyncMemory.from_config({**mem0_config(cfg, args.extract_model, COLLECTION),
                                    "history_db_path": str(RESULTS / "mem0_locomo_history.db")})
     http = OpenRouterHTTP(cfg.api_key(), cfg.openrouter_base_url, timeout_s=120)

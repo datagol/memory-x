@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound
+from memx import InputTooLarge, InvalidScope, Memory, MemxConfig, NotFound, __version__
 from memx.memory import UNSET
 from memx.config import InsertMode
 from memx.documents import DocumentError, read_document
@@ -68,7 +68,33 @@ async def _memory_lifespan(app: FastAPI):
     await app.state.memory.close()
 
 
-app = FastAPI(title="memx", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="memx", version=__version__, lifespan=lifespan)
+
+LOCAL_HOSTS = "localhost,127.0.0.1,[::1],api"
+
+
+@app.middleware("http")
+async def local_hosts_only_without_a_token(request: Request, call_next):
+    """With no API token, answer only requests addressed to this machine.
+
+    A web page can point its own hostname at 127.0.0.1 (DNS rebinding) and reach a tokenless API from the browser of
+    whoever runs it; such a request still carries the page's hostname in Host. With a token set, the token is the
+    protection and any Host is served. MEMX_ALLOWED_HOSTS overrides the list (comma separated, '*' turns it off).
+    """
+    mem = getattr(request.app.state, "memory", None)
+    cfg = mem.ctx.config if mem is not None else getattr(request.app.state, "config", None)
+    token = cfg.api_token if cfg is not None else None
+    if (token is None or not token.get_secret_value()) and request.url.path not in ("/healthz", "/readyz"):
+        allowed = os.environ.get("MEMX_ALLOWED_HOSTS") or LOCAL_HOSTS
+        if allowed.strip() != "*":
+            host = request.headers.get("host", "")
+            name = host[: host.index("]") + 1] if host.startswith("[") else host.rsplit(":", 1)[0]
+            if name.lower() not in {h.strip().lower() for h in allowed.split(",")}:
+                return JSONResponse(status_code=421, content={
+                    "detail": f"memx has no API token, so it only answers requests addressed to this machine; "
+                              f"{name!r} is not one of its names. Set MEMX_API_TOKEN, or add the name to "
+                              f"MEMX_ALLOWED_HOSTS."})
+    return await call_next(request)
 
 
 def memory(request: Request) -> Memory:
@@ -85,7 +111,8 @@ def require_token(request: Request, authorization: Annotated[str | None, Header(
     if token is None or not token.get_secret_value():
         return
     expected = f"Bearer {token.get_secret_value()}"
-    if not authorization or not hmac.compare_digest(authorization, expected):
+    # Compared as bytes: compare_digest refuses non-ASCII text, which would turn a garbage header into a 500.
+    if not authorization or not hmac.compare_digest(authorization.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="missing or invalid bearer token")
 
 
@@ -129,11 +156,11 @@ class IngestBody(BaseModel):
 
 
 class RecallBody(BaseModel):
-    query: str | None = None
-    recent_turns: list[Turn] | None = None
-    budget_tokens: int | None = Field(default=None, gt=0)
+    query: str | None = Field(default=None, max_length=20_000)
+    recent_turns: list[Turn] | None = Field(default=None, max_length=50)
+    budget_tokens: int | None = Field(default=None, gt=0, le=200_000)
     categories: set[Category] | None = None
-    k: int | None = Field(default=None, gt=0)
+    k: int | None = Field(default=None, gt=0, le=1000)
     force_mode: RecallMode | None = None
     as_of: datetime | None = None
     explain: bool = False
@@ -158,13 +185,19 @@ async def extract_document(request: Request, mem: Mem, filename: str | None = No
 
     Nothing is stored: the caller reviews the text and then posts it to ``/v1/scopes/{scope}/ingests``.
     """
-    data = await request.body()
+    too_big = HTTPException(status_code=413, detail=f"the file is over {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    if request.headers.get("content-length", "0").isdigit() and int(request.headers["content-length"]) > MAX_UPLOAD_BYTES:
+        raise too_big  # refuse before reading it into memory
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise too_big
+    data = bytes(data)
     if not data:
         raise HTTPException(status_code=422, detail="the request body is empty; send the file's bytes")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"the file is over {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
     try:
-        doc = read_document(data, filename)
+        doc = await asyncio.to_thread(read_document, data, filename)  # parsing a PDF can take seconds
     except DocumentError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     limit = mem.ctx.config.max_input_chars
@@ -210,8 +243,8 @@ async def render(scope: str, mem: Mem, show_scope: bool = False, include_ancesto
 
 @app.get("/v1/scopes/{scope}/facts", response_model=list[Fact], dependencies=v1)
 async def list_facts(scope: str, mem: Mem, status: str | None = "active", category: Category | None = None,
-                     include_ancestors: bool = False, limit: Annotated[int, Query(le=1000)] = 100,
-                     offset: int = 0) -> list[Fact]:
+                     include_ancestors: bool = False, limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+                     offset: Annotated[int, Query(ge=0)] = 0) -> list[Fact]:
     return await mem.facts(scope, status=status or None, category=category, include_ancestors=include_ancestors,
                            limit=limit, offset=offset)
 
@@ -294,7 +327,10 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/readyz")
 async def readyz(mem: Mem) -> dict[str, Any]:
-    return await mem.health()
+    try:
+        return await asyncio.wait_for(mem.health(), timeout=5)
+    except Exception as exc:  # noqa: BLE001 - whatever is wrong with the database, the answer is "not ready"
+        raise HTTPException(status_code=503, detail=f"database not reachable: {type(exc).__name__}") from exc
 
 
 app.include_router(dashboard.router, dependencies=v1)

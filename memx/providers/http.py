@@ -38,11 +38,28 @@ class OpenRouterHTTP:
         except Exception:  # noqa: BLE001 - closing a broken pool can itself fail
             pass
 
-    async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
+    async def _pause(self, attempt: int, resp: httpx.Response | None = None) -> None:
+        """Wait before the next attempt: as long as the provider asked for (Retry-After, capped), else backing off."""
+        wait = 0.5 * 2**attempt + random.random() * 0.25
+        asked = resp.headers.get("retry-after") if resp is not None else None
+        if asked:
+            try:
+                wait = max(wait, min(float(asked), 30.0))
+            except ValueError:  # an HTTP date; keep the backoff
+                pass
+        await asyncio.sleep(wait)
+
+    async def post(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+        """``timeout`` overrides the client's for calls known to run long (a full extraction)."""
         last: ProviderError | None = None
         for attempt in range(self._attempts):
+            resp = None
             try:
-                resp = await self._client.post(path, json=body)
+                resp = await self._client.post(path, json=body, timeout=timeout or self._timeout)
             except (httpx.HTTPError, ssl.SSLError) as exc:  # TLS record errors can escape httpx under load
                 last = ProviderError(f"{path}: {type(exc).__name__}: {exc}", retryable=True)
                 if isinstance(exc, (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.ConnectError,
@@ -77,7 +94,7 @@ class OpenRouterHTTP:
                     else:
                         return data
             if attempt < self._attempts - 1:
-                await asyncio.sleep(0.5 * 2**attempt + random.random() * 0.25)
+                await self._pause(attempt, resp)
         assert last is not None
         raise last
 
@@ -96,7 +113,10 @@ class OpenRouterHTTP:
                     raise ProviderError(f"{path}: HTTP {resp.status_code}: {resp.text[:500]}", retryable=False,
                                         status=resp.status_code)
                 else:
-                    return resp.json()
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        last = ProviderError(f"{path}: malformed JSON body: {resp.text[:200]!r}", retryable=True)
             if attempt < self._attempts - 1:
                 await asyncio.sleep(0.5 * 2**attempt + random.random() * 0.25)
         assert last is not None

@@ -24,6 +24,7 @@ from typing import Any
 
 from eval.longmemeval.run import ANSWER_PROMPT, BENCH_DSN, DATA, chat, judged_yes
 from eval.orgprobe import fixtures as fx
+from eval import bench_dsn
 from memx import Memory, Messages, MemxConfig, Text, Turn
 from memx.providers.http import OpenRouterHTTP
 
@@ -83,7 +84,7 @@ def mem0_memory():
     from mem0 import AsyncMemory
 
     from eval.longmemeval.run_mem0 import mem0_config
-    cfg = MemxConfig(dsn=BENCH_DSN)
+    cfg = MemxConfig(dsn=bench_dsn(BENCH_DSN))
     conf = mem0_config(cfg, "anthropic/claude-haiku-5.5")
     conf["vector_store"]["config"]["collection_name"] = "mem0_orgprobe"
     conf["history_db_path"] = str(RESULTS / "mem0_orgprobe_history.db")
@@ -151,13 +152,13 @@ async def main_async(args) -> None:
     configs: list[tuple[str, Any]] = []
     mem = m0 = None
     if "memx" in args.system:
-        mem = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline"), start_runner=False)
+        mem = await Memory.connect(MemxConfig(dsn=bench_dsn(args.dsn), insert_mode="inline"), start_runner=False)
         t = time.perf_counter()
         await memx_ingest(mem)
         print(f"memx ingest {time.perf_counter() - t:.0f}s")
         configs += [("memx_ranked_2k", {"force_mode": "ranked", "budget_tokens": 2000}),
                     ("memx_full", {"force_mode": "full", "budget_tokens": 200_000})]
-        mem_nowalk = await Memory.connect(MemxConfig(dsn=args.dsn, insert_mode="inline", walk_enabled=False),
+        mem_nowalk = await Memory.connect(MemxConfig(dsn=bench_dsn(args.dsn), insert_mode="inline", walk_enabled=False),
                                           start_runner=False, run_migrations=False)
         configs.append(("memx_ranked_2k_nowalk", ("nowalk", {"force_mode": "ranked", "budget_tokens": 2000})))
     if "mem0" in args.system:

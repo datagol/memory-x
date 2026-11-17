@@ -12,12 +12,17 @@ RUN pnpm build   # writes /src/memx_api/static
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY pyproject.toml ./
+# Pinned dependencies first, so the same build always installs the same versions and a code change does not
+# reinstall them. Regenerate with: uv lock && uv export --frozen --extra server --no-dev --no-emit-project
+#   --no-hashes -o requirements.lock
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
+COPY pyproject.toml README.md LICENSE ./
 COPY memx ./memx
 COPY memx_api ./memx_api
 COPY memx_mcp ./memx_mcp
 COPY --from=web /src/memx_api/static ./memx_api/static
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 RUN useradd --create-home memx
 USER memx
 EXPOSE 8000

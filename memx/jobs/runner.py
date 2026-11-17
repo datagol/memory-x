@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -78,14 +79,19 @@ class JobRunner:
             if job is None:
                 await self._sleep(self.ctx.config.job_poll_seconds)
                 continue
-            await self.run_job(job)
+            try:
+                await self.run_job(job)
+            except Exception:  # noqa: BLE001 - recording the outcome failed; the lease will expire and requeue it
+                log.exception("could not record the outcome of job %s", job["id"])
+                await self._sleep(5)
 
     async def run_job(self, job: dict[str, Any]) -> None:
         handler = self.handlers.get(job["kind"])
         try:
             if handler is None:
                 raise ValueError(f"no handler for job kind {job['kind']!r}")
-            await handler(job["payload"])
+            async with queue.keeping_lease(self.ctx.pool, job["idempotency_key"], job["lease_seconds"]):
+                await handler(job["payload"])
         except asyncio.CancelledError:
             raise  # lease expiry will requeue it
         except queue.Deferred as wait:
@@ -93,8 +99,10 @@ class JobRunner:
                 await queue.defer(conn, job["id"], wait.seconds)
             return
         except Exception as exc:  # noqa: BLE001
-            retryable = exc.retryable if isinstance(exc, ProviderError) else not isinstance(
-                exc, (ValidationError, ValueError, TypeError, KeyError))
+            # A model answer that cannot be read (bad JSON, a missing key) is worth another try; bad input is not.
+            retryable = exc.retryable if isinstance(exc, ProviderError) else (
+                isinstance(exc, (json.JSONDecodeError, KeyError))
+                or not isinstance(exc, (ValidationError, ValueError, TypeError)))
             message = f"{type(exc).__name__}: {exc}"
             log.warning("job %s (%s) failed: %s", job["id"], job["kind"], message)
             async with self.ctx.pool.connection() as conn:
@@ -124,6 +132,11 @@ class JobRunner:
         while not self._stop.is_set():
             try:
                 async with self.ctx.pool.connection() as conn:
+                    for dead in await queue.bury_expired(conn):
+                        log.warning("job %s (%s) gave up: %s", dead["id"], dead["kind"], dead["last_error"])
+                        if dead["kind"] == "ingest" and dead["payload"].get("ingest_id"):
+                            await repo.fail_ingest(conn, UUID(dead["payload"]["ingest_id"]), dead["last_error"],
+                                                   final=True)
                     requeued = await queue.reap(conn)
                     if requeued:
                         log.info("requeued %d jobs with expired leases", requeued)

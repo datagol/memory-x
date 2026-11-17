@@ -257,6 +257,7 @@ class SweepReport(BaseModel):
     purged: int
     decisions_pruned: int
     jobs_pruned: int
+    recalls_pruned: int = 0
 
 
 class ExportReport(BaseModel):

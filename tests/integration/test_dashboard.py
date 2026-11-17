@@ -20,7 +20,7 @@ async def client(make_memory):
     mem = await make_memory(extractor=SentenceExtractor(hints={"prefers": "preference", "likes": "preference"}),
                             judge=FakeJudge(verdict=theme_verdict), budget_tokens=120)
     app.state.memory = mem
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as c:
         yield c
 
 
