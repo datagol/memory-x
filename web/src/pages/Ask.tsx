@@ -6,7 +6,7 @@ import { api, type Explain, type ExplainCandidate, type PathStep } from "../lib/
 import { useApp } from "../lib/app";
 import { FOUND_BY_META, GRADE_LEVELS, STATUS_META, fmtDate, ms, num, pct, short, topicLabel, truncate } from "../lib/meta";
 import { nodeTypes } from "../components/FlowNodes";
-import { Card, CategoryChip, Empty, ErrorBox, Loading, MemoryMarkdown, Meter, Pill, Seg, useTip, useToast } from "../components/ui";
+import { Card, CategoryChip, Empty, ErrorBox, Loading, MemoryMarkdown, Meter, Pill, Seg, useTip, useToast, rowKeys } from "../components/ui";
 
 const walked = (c: ExplainCandidate) => c.found_by === "entity_hop" || c.found_by === "topic_hop";
 
@@ -216,7 +216,7 @@ function RankingTable({ ex }: { ex: Explain }) {
               const meta = STATUS_META[c.status];
               const levels = c.grade_levels;
               return (
-                <tr key={c.id} className={`click ${c.status === "picked" ? "" : "dim"}`} onClick={() => openFact(c.id)}>
+                <tr key={c.id} className={`click ${c.status === "picked" ? "" : "dim"}`} onClick={() => openFact(c.id)} {...rowKeys(() => openFact(c.id))}>
                   <td style={{ minWidth: 300 }}>
                     <div className="row" style={{ gap: 6, marginBottom: 4 }}>
                       <Pill tone={meta.tone} title={meta.help}>{ranks.get(c.id) ? `#${ranks.get(c.id)} ` : ""}{meta.label}</Pill>

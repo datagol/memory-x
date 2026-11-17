@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { Component, createContext, type KeyboardEvent as ReactKeyboardEvent, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AlertTriangle, Inbox, Loader2, X } from "lucide-react";
 import type { Category } from "../lib/api";
@@ -76,6 +76,41 @@ export function ErrorBox({ error }: { error: unknown }) {
       <div>{message}</div>
     </div>
   );
+}
+
+/** Makes a clickable table row reachable by keyboard: Tab focuses it, Enter or Space opens it. */
+export function rowKeys(open: () => void) {
+  return {
+    tabIndex: 0,
+    onKeyDown: (e: ReactKeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    },
+  };
+}
+
+/** Catches a rendering error anywhere below it, so one unexpected value shows a message instead of a blank page. */
+export class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="page">
+        <ErrorBox error={`This page could not be shown: ${this.state.error.message}`} />
+        <p>
+          <button className="btn" onClick={() => this.setState({ error: null })}>Try again</button>{" "}
+          <button className="btn ghost" onClick={() => window.location.reload()}>Reload</button>
+        </p>
+      </div>
+    );
+  }
 }
 
 export function Card({ title, sub, right, children, flush, className }: {

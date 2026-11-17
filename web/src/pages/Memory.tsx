@@ -6,7 +6,7 @@ import { useApp } from "../lib/app";
 import { CATEGORIES, CATEGORY_LABEL, fmtDate, num } from "../lib/meta";
 import { statusTone } from "../components/FactDrawer";
 import { ScopeSettingsCard } from "../components/ScopeSettings";
-import { Card, CategoryChip, ConfirmButton, Empty, ErrorBox, Loading, MemoryMarkdown, Pill, Seg, useToast } from "../components/ui";
+import { Card, CategoryChip, ConfirmButton, Empty, ErrorBox, Loading, MemoryMarkdown, Pill, Seg, useToast, rowKeys } from "../components/ui";
 
 export function MemoryPage() {
   const { scope, openFact, setScope } = useApp();
@@ -45,9 +45,16 @@ export function MemoryPage() {
           <p>What an agent at <code>{scope}</code> receives, and every fact behind it. Select a fact to see its history and the decisions that shaped it.</p>
         </div>
         <div className="actions">
-          <ConfirmButton confirmLabel={`Forget ${scope} and everything below`} onConfirm={() => forget.mutate()} disabled={forget.isPending}>
-            <Trash2 /> Forget scope
-          </ConfirmButton>
+          {scope.includes(".") ? (
+            <ConfirmButton confirmLabel={`Forget ${scope} and everything below`} onConfirm={() => forget.mutate()} disabled={forget.isPending}>
+              <Trash2 /> Forget scope
+            </ConfirmButton>
+          ) : (
+            // The top scope holds every tenant's memory; wiping all of it is not a two-click action.
+            <button className="btn danger" disabled title={`${scope} is the top scope. Pick a scope below it to forget.`}>
+              <Trash2 /> Forget scope
+            </button>
+          )}
         </div>
       </div>
       <ScopeSettingsCard scope={scope} />
@@ -92,7 +99,7 @@ export function MemoryPage() {
                 <thead><tr><th>Fact</th><th>Category</th><th className="n">Trust</th><th>Observed</th></tr></thead>
                 <tbody>
                   {rows.map((f) => (
-                    <tr key={f.id} className={`click ${f.status !== "active" ? "dim" : ""}`} onClick={() => openFact(f.id)}>
+                    <tr key={f.id} className={`click ${f.status !== "active" ? "dim" : ""}`} onClick={() => openFact(f.id)} {...rowKeys(() => openFact(f.id))}>
                       <td>
                         <div style={{ textDecoration: f.status !== "active" ? "line-through" : undefined }}>{f.text}</div>
                         <div className="row small faint" style={{ gap: 6, marginTop: 3 }}>

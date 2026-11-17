@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useApp } from "../lib/app";
 import { fmtDate, ms, timeAgo, truncate } from "../lib/meta";
-import { Card, Empty, ErrorBox, Loading, Pill } from "../components/ui";
+import { Card, Empty, ErrorBox, Loading, Pill, rowKeys } from "../components/ui";
 
 type Tab = "ingests" | "recalls" | "jobs";
 
@@ -47,7 +47,7 @@ export function ActivityPage({ tab: initial }: { tab?: string }) {
             <thead><tr><th>Status</th><th>Input</th><th>Scope</th><th className="n">Added</th><th className="n">Dup</th><th className="n">Replaced</th><th className="n">Time</th><th>When</th></tr></thead>
             <tbody>
               {ingests.data.map((r) => (
-                <tr key={r.id} className="click" onClick={() => go({ page: "ingest", id: r.id })}>
+                <tr key={r.id} className="click" onClick={() => go({ page: "ingest", id: r.id })} {...rowKeys(() => go({ page: "ingest", id: r.id }))}>
                   <td><Pill tone={r.status === "committed" ? "ok" : r.status === "failed" ? "danger" : "warn"}>{r.status}</Pill></td>
                   <td style={{ maxWidth: 440 }}>
                     <div className="ellipsis">{truncate(r.preview, 140)}</div>
@@ -69,7 +69,7 @@ export function ActivityPage({ tab: initial }: { tab?: string }) {
             <thead><tr><th>Mode</th><th>Question</th><th>Scope</th><th className="n">Facts</th><th className="n">Tokens</th><th className="n">Latency</th><th>When</th></tr></thead>
             <tbody>
               {recalls.data.map((r) => (
-                <tr key={r.id} className="click" onClick={() => go({ page: "recall", id: r.id })}>
+                <tr key={r.id} className="click" onClick={() => go({ page: "recall", id: r.id })} {...rowKeys(() => go({ page: "recall", id: r.id }))}>
                   <td><Pill tone={r.mode === "ranked" ? "accent" : "purple"}>{r.mode}</Pill></td>
                   <td style={{ maxWidth: 440 }}><div className="ellipsis">{r.query ?? <span className="muted">(no query)</span>}</div></td>
                   <td className="mono small">{r.scope}</td>

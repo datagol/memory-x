@@ -1,71 +1,68 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Background, Controls, MarkerType, Panel, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node } from "@xyflow/react";
 import {
-  Background, Controls, MarkerType, Panel, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node, type NodeChange,
-} from "@xyflow/react";
-import { ChevronDown, ChevronRight, ExternalLink, Info, RotateCcw, X } from "lucide-react";
+  forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type Simulation, type SimulationLinkDatum,
+  type SimulationNodeDatum,
+} from "d3-force";
+import { ExternalLink, Info, RotateCcw, X } from "lucide-react";
 import { api, type Category, type GraphData } from "../lib/api";
 import { useApp } from "../lib/app";
 import { CATEGORIES, CATEGORY_LABEL, ENTITY_TYPE_LABEL, catVar, topicLabel, truncate } from "../lib/meta";
-import {
-  EntityIcon, facing, nodeTypes, type ClusterKind, type ClusterLabelData, type ClusterNodeData, type EntityNodeData, type FactNodeData,
-} from "../components/FlowNodes";
+import { EntityIcon } from "../components/FlowNodes";
+import { graphEdgeTypes, graphNodeTypes, type AnchorData, type AnchorKind, type FactDotData } from "../components/GraphNodes";
 import { statusTone } from "../components/FactDrawer";
 import { Card, CategoryChip, Empty, ErrorBox, Loading, Pill, Seg } from "../components/ui";
 
-// Geometry. Fact heights are estimated from text length so boxes can be laid out before React Flow measures.
-const NODE_W = 260;
-const ENT_W = 214;
-const ENT_H = 50;
-const PAD = 16;
-const GAP = 48;
-const COL_GAP = 18;
-const FACT_GAP = 12;
-const LABEL_H = 38;
-const CHIP_MAX = 3;
+// A live network. Facts are dots; names, themes or scopes are circles ("anchors") the facts are tied to by springs.
+// Everything can be dragged: pull a node and what is tied to it follows, then settles.
+const FACT_D = 14;
+const anchorD = (count: number) => 30 + Math.min(52, Math.round(Math.sqrt(count) * 9));
 
 type XY = { x: number; y: number };
-type Size = { w: number; h: number };
 type GFact = GraphData["facts"][number];
 type Ent = GraphData["entities"][number] & { degree: number; hub: boolean };
-type Group = "entity" | "scope";
+/** What the facts are grouped round. "none" draws only the facts and the links between them. */
+type Group = "none" | "entity" | "theme" | "scope";
 
-interface Cluster {
+/** A name, theme or scope drawn as a circle. */
+interface Anchor {
   id: string;
-  kind: ClusterKind;
+  kind: AnchorKind;
   label: string;
-  entity?: string;
-  facts: string[];
+  type?: string;
+  count: number;
+  d: number;
+  /** A name most facts mention: its links pull less and are drawn fainter. */
+  hub?: boolean;
   here?: boolean;
 }
 
+/** The facts filed under one name, theme or scope; selecting a group lights them. */
+interface ListGroup { id: string; kind: AnchorKind | "loose" | "category"; label: string; type?: string; category?: Category; facts: string[] }
+
+interface Tie { fact: string; anchor: string; hub: boolean }
+
 interface Model {
-  clusters: Cluster[];
+  anchors: Anchor[];
+  /** Every fact tied to every anchor it belongs to: all the names it mentions, or its theme, or its scope. */
+  ties: Tie[];
+  /** Two names that some fact mentions together, and how many facts do. */
+  pairs: { a: string; b: string; n: number }[];
+  groups: ListGroup[];
   facts: GFact[];
   factById: Map<string, GFact>;
   entityById: Map<string, Ent>;
-  nodeEntities: string[];
-  hubs: Ent[];
   mentionsByFact: Map<string, string[]>;
   factsByEntity: Map<string, string[]>;
-  clusterOf: Map<string, string>;
-  sizes: Map<string, Size>;
-  auto: Map<string, XY>;
-  chips: Map<string, { name: string; type: string }[]>;
 }
 
-function factHeight(text: string, footer: boolean) {
-  const lines = Math.min(3, Math.max(1, Math.ceil(text.length / 40)));
-  return 18 + 20 + 6 + lines * 17.5 + (footer ? 24 : 0);
-}
-
-/** Decide which box every fact goes in, then lay the boxes out.
+/** Work out what is drawn and what is tied to what. One rule per view:
  *
- *  "entity": an entity mentioned by two or more active facts becomes a box headed by that entity, holding the facts
- *  filed under it (each fact goes to its most-mentioned entity). Entities in most facts (hubs, like the company
- *  name) are not boxes; they are listed above the canvas. Facts with no shared entity are grouped by Jev's theme.
- *  Replaced facts sit right under the fact that replaced them.
- *  "scope": one box per scope, broader scopes on the left. */
+ *  "entity" (by name): every name is a circle, and a fact is tied to each name it mentions. Facts that mention
+ *  nothing float free. "theme": a circle per theme Jev gave the facts. "scope": a circle per scope.
+ *  A replaced fact is tied to the fact that replaced it instead.
+ *  Each fact is also filed once: under the most specific name it shares, its theme or its scope. */
 function buildModel(data: GraphData, hidden: Set<Category>, group: Group): Model {
   const facts = data.facts.filter((f) => !hidden.has(f.category));
   const factById = new Map(facts.map((f) => [f.id, f]));
@@ -83,29 +80,70 @@ function buildModel(data: GraphData, hidden: Set<Category>, group: Group): Model
     const degree = (factsByEntity.get(e.id) ?? []).filter((id) => factById.get(id)?.status === "active").length;
     entityById.set(e.id, { ...e, degree, hub: degree >= hubMin });
   }
-  const linking = (id: string) => { const e = entityById.get(id); return !!e && !e.hub && e.degree >= 2; };
-  const hubs = [...entityById.values()].filter((e) => e.hub).sort((a, b) => b.degree - a.degree || a.name.localeCompare(b.name));
+  const named = (fid: string) => (mentionsByFact.get(fid) ?? []).filter((e) => entityById.has(e));
+  const replacedBy = (f: GFact) => (f.status !== "active" && f.superseded_by && factById.has(f.superseded_by) ? f.superseded_by : null);
 
-  const primary = (fid: string): string | null => {
-    const es = (mentionsByFact.get(fid) ?? []).filter(linking);
-    es.sort((a, b) => entityById.get(b)!.degree - entityById.get(a)!.degree || entityById.get(a)!.name.localeCompare(entityById.get(b)!.name));
-    return es[0] ?? null;
-  };
-  const homeKey = (f: GFact, depth = 0): string => {
-    if (f.status !== "active" && f.superseded_by && factById.has(f.superseded_by) && depth < 20) {
-      return homeKey(factById.get(f.superseded_by)!, depth + 1);
+  const anchors: Anchor[] = [];
+  const ties: Tie[] = [];
+  if (group === "entity") {
+    for (const e of entityById.values()) {
+      const n = (factsByEntity.get(e.id) ?? []).length;
+      if (n) anchors.push({ id: e.id, kind: "entity", label: e.name, type: e.type, count: Math.max(e.degree, 1), d: anchorD(Math.max(e.degree, 1)), hub: e.hub });
     }
-    const p = primary(f.id);
-    if (p) return `e:${p}`;
-    if (f.topic) return `t:${f.topic}`;
-    return "loose";
+    for (const f of facts) {
+      if (replacedBy(f)) continue;
+      for (const e of named(f.id)) ties.push({ fact: f.id, anchor: e, hub: entityById.get(e)!.hub });
+    }
+  } else if (group !== "none") {
+    const key = (f: GFact) => (group === "theme" ? (f.topic ? `hub:t:${f.topic}` : null) : `hub:s:${f.scope}`);
+    const counts = new Map<string, number>();
+    for (const f of facts) {
+      const k = key(f);
+      if (!k) continue;
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+      if (!replacedBy(f)) ties.push({ fact: f.id, anchor: k, hub: false });
+    }
+    for (const [k, n] of counts) {
+      const name = k.slice(6);
+      anchors.push(group === "theme"
+        ? { id: k, kind: "theme", label: topicLabel(name), count: n, d: anchorD(n) }
+        // The last part of the path names the scope; the whole path would not fit under the circle.
+        : { id: k, kind: "scope", label: name.split(".").pop()!, count: n, d: anchorD(n), here: name === data.scope });
+    }
+  }
+  anchors.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+  const pairCount = new Map<string, number>();
+  if (group === "entity") {
+    for (const f of facts) {
+      const es = named(f.id).filter((e) => !entityById.get(e)!.hub).sort();
+      for (let i = 0; i < es.length; i++) for (let j = i + 1; j < es.length; j++) {
+        pairCount.set(`${es[i]}|${es[j]}`, (pairCount.get(`${es[i]}|${es[j]}`) ?? 0) + 1);
+      }
+    }
+  }
+  // One shared fact already joins two names through its dot; a band is for names that keep turning up together.
+  const pairs = [...pairCount].filter(([, n]) => n >= 2).map(([k, n]) => ({ a: k.split("|")[0], b: k.split("|")[1], n }));
+
+  // The list: one heading per circle that has facts filed under it, biggest first, then the facts with no circle.
+  const byDegree = (a: string, b: string) =>
+    entityById.get(b)!.degree - entityById.get(a)!.degree || entityById.get(a)!.name.localeCompare(entityById.get(b)!.name);
+  const specific = (id: string) => { const e = entityById.get(id)!; return !e.hub && e.degree >= 2; };
+  const filedUnder = (f: GFact, depth = 0): string => {
+    const by = replacedBy(f);
+    if (by && depth < 20) return filedUnder(factById.get(by)!, depth + 1);
+    if (group === "none") return `cat:${f.category}`;
+    if (group === "scope") return `hub:s:${f.scope}`;
+    if (group === "theme") return f.topic ? `hub:t:${f.topic}` : "loose";
+    const es = named(f.id);
+    return es.filter(specific).sort(byDegree)[0] ?? es.filter((e) => entityById.get(e)!.hub).sort(byDegree)[0] ?? es.sort(byDegree)[0] ?? "loose";
   };
-  const cmp = (a: string, b: string) => {
-    const fa = factById.get(a)!, fb = factById.get(b)!;
-    return CATEGORIES.indexOf(fa.category) - CATEGORIES.indexOf(fb.category) || fb.observed_at.localeCompare(fa.observed_at);
-  };
-  /** Active facts in category order, each followed by the facts it replaced. */
+  const filed = new Map<string, string[]>();
+  for (const f of facts) { const k = filedUnder(f); filed.set(k, [...(filed.get(k) ?? []), f.id]); }
   const order = (list: string[]) => {
+    const cmp = (a: string, b: string) =>
+      CATEGORIES.indexOf(factById.get(a)!.category) - CATEGORIES.indexOf(factById.get(b)!.category)
+      || factById.get(b)!.observed_at.localeCompare(factById.get(a)!.observed_at);
     const act = list.filter((id) => factById.get(id)!.status === "active").sort(cmp);
     const rest = list.filter((id) => factById.get(id)!.status !== "active").sort(cmp);
     const out: string[] = [];
@@ -119,139 +157,84 @@ function buildModel(data: GraphData, hidden: Set<Category>, group: Group): Model
     rest.forEach((r) => !used.has(r) && add(r));
     return out;
   };
-
-  const clusters: Cluster[] = [];
-  let nodeEntities: string[] = [];
-  if (group === "entity") {
-    const groups = new Map<string, string[]>();
-    for (const f of facts) { const k = homeKey(f); groups.set(k, [...(groups.get(k) ?? []), f.id]); }
-    nodeEntities = [...entityById.values()].filter((e) => linking(e.id)).map((e) => e.id);
-    const entityClusters = nodeEntities.map((eid) => ({
-      id: `cluster:e:${eid}`, kind: "entity" as const, label: entityById.get(eid)!.name, entity: eid, facts: order(groups.get(`e:${eid}`) ?? []),
-    }));
-    // Order entity boxes so boxes that link to each other sit next to each other.
-    const clusterKey = new Map<string, string>();
-    for (const c of entityClusters) for (const f of c.facts) clusterKey.set(f, c.id);
-    const weight = new Map<string, number>();
-    const bump = (a: string, b: string) => { if (a === b) return; const k = a < b ? `${a}|${b}` : `${b}|${a}`; weight.set(k, (weight.get(k) ?? 0) + 1); };
-    for (const [fid, cid] of clusterKey) for (const e of (mentionsByFact.get(fid) ?? []).filter(linking)) bump(cid, `cluster:e:${e}`);
-    const w = (a: string, b: string) => weight.get(a < b ? `${a}|${b}` : `${b}|${a}`) ?? 0;
-    const size = (c: Cluster) => c.facts.length + (c.entity ? entityById.get(c.entity)!.degree / 100 : 0);
-    const remaining = [...entityClusters].sort((a, b) => size(b) - size(a));
-    const ordered: Cluster[] = [];
-    while (remaining.length) {
-      let best = 0;
-      if (ordered.length) {
-        let bestScore = -1;
-        remaining.forEach((c, i) => {
-          const score = w(ordered[ordered.length - 1].id, c.id) * 100 + ordered.reduce((acc, o) => acc + w(o.id, c.id), 0) * 10 + size(c);
-          if (score > bestScore) { bestScore = score; best = i; }
-        });
-      }
-      ordered.push(remaining.splice(best, 1)[0]);
-    }
-    clusters.push(...ordered);
-    const themes = [...groups].filter(([k]) => k.startsWith("t:")).sort((a, b) => b[1].length - a[1].length);
-    for (const [k, list] of themes) clusters.push({ id: `cluster:${k}`, kind: "theme", label: topicLabel(k.slice(2)), facts: order(list) });
-    if (groups.has("loose")) clusters.push({ id: "cluster:loose", kind: "loose", label: "No shared entity or theme", facts: order(groups.get("loose")!) });
-  } else {
-    for (const scope of data.scopes) {
-      const mine = facts.filter((f) => f.scope === scope);
-      if (!mine.length) continue;
-      const byKey = new Map<string, string[]>();
-      for (const f of mine) { const k = homeKey(f); byKey.set(k, [...(byKey.get(k) ?? []), f.id]); }
-      const list = [...byKey.values()].sort((a, b) => b.length - a.length).flatMap(order);
-      clusters.push({ id: `cluster:s:${scope}`, kind: "scope", label: scope, facts: list, here: scope === data.scope });
-    }
+  const groups: ListGroup[] = anchors.filter((a) => filed.has(a.id))
+    .map((a) => ({ id: a.id, kind: a.kind, label: a.label, type: a.type, facts: order(filed.get(a.id)!) }))
+    .sort((a, b) => b.facts.length - a.facts.length);
+  // With no grouping the list still needs headings to scan by: the categories, in their usual order.
+  for (const c of CATEGORIES) {
+    if (filed.has(`cat:${c}`)) groups.push({ id: `cat:${c}`, kind: "category", label: CATEGORY_LABEL[c], category: c, facts: order(filed.get(`cat:${c}`)!) });
   }
-
-  const clusterOf = new Map<string, string>();
-  for (const c of clusters) {
-    if (c.entity) clusterOf.set(c.entity, c.id);
-    for (const f of c.facts) clusterOf.set(f, c.id);
+  if (filed.has("loose")) {
+    groups.push({ id: "loose", kind: "loose", label: group === "entity" ? "Mention no name" : "No theme", facts: order(filed.get("loose")!) });
   }
-  const own = new Map(clusters.filter((c) => c.entity).flatMap((c) => c.facts.map((f) => [f, c.entity!] as const)));
-  const chips = new Map<string, { name: string; type: string }[]>();
-  const sizes = new Map<string, Size>();
-  for (const f of facts) {
-    const list = (mentionsByFact.get(f.id) ?? []).filter((e) => e !== own.get(f.id)).map((e) => entityById.get(e)).filter(Boolean) as Ent[];
-    list.sort((a, b) => b.degree - a.degree || a.name.localeCompare(b.name));
-    chips.set(f.id, list.map((e) => ({ name: e.name, type: e.type })));
-    sizes.set(f.id, { w: NODE_W, h: factHeight(f.text, list.length > 0 || f.scope !== data.scope) });
-  }
-  for (const eid of nodeEntities) sizes.set(eid, { w: ENT_W, h: ENT_H });
-
-  // Inner layout of each box, then the boxes themselves: a masonry grid for groups, one row for scopes.
-  const auto = new Map<string, XY>();
-  const inner = new Map<string, { offs: Map<string, XY>; size: Size; span: number }>();
-  for (const c of clusters) {
-    const n = c.facts.length;
-    const k = c.kind === "scope" ? Math.max(1, Math.min(4, Math.ceil(Math.sqrt(n / 3)))) : n > 6 ? 2 : 1;
-    const header = c.kind === "entity" ? ENT_H + 20 : LABEL_H;
-    const per = Math.max(1, Math.ceil(n / k));
-    const colH = Array(k).fill(0) as number[];
-    const offs = new Map<string, XY>();
-    c.facts.forEach((fid, i) => {
-      const col = Math.min(k - 1, Math.floor(i / per));
-      offs.set(fid, { x: col * (NODE_W + COL_GAP), y: header + colH[col] });
-      colH[col] += sizes.get(fid)!.h + FACT_GAP;
-    });
-    const innerW = k * NODE_W + (k - 1) * COL_GAP;
-    if (c.entity) offs.set(c.entity, { x: (innerW - ENT_W) / 2, y: 0 });
-    const innerH = n ? header + Math.max(...colH) - FACT_GAP : c.entity ? ENT_H : LABEL_H;
-    inner.set(c.id, { offs, size: { w: innerW + 2 * PAD, h: innerH + 2 * PAD }, span: k });
-  }
-  const origin = new Map<string, XY>();
-  if (group === "scope") {
-    let x = 0;
-    for (const c of clusters) { origin.set(c.id, { x, y: 0 }); x += inner.get(c.id)!.size.w + GAP * 1.5; }
-  } else {
-    const U = NODE_W + 2 * PAD + GAP;
-    const units = clusters.reduce((a, c) => a + inner.get(c.id)!.span, 0);
-    const maxSpan = Math.max(1, ...clusters.map((c) => inner.get(c.id)!.span));
-    let K = Math.max(1, Math.min(6, Math.round(Math.sqrt(units * 1.6))));
-    K = Math.min(Math.max(K, maxSpan), Math.max(units, 1));
-    const heights = Array(K).fill(0) as number[];
-    for (const c of clusters) {
-      const { span, size } = inner.get(c.id)!;
-      let start = 0;
-      let top = Infinity;
-      for (let s = 0; s + span <= K; s++) {
-        const h = Math.max(...heights.slice(s, s + span));
-        if (h < top) { top = h; start = s; }
-      }
-      origin.set(c.id, { x: start * U, y: top });
-      for (let s = start; s < start + span; s++) heights[s] = top + size.h + GAP;
-    }
-  }
-  for (const c of clusters) {
-    const o = origin.get(c.id)!;
-    for (const [id, off] of inner.get(c.id)!.offs) auto.set(id, { x: o.x + PAD + off.x, y: o.y + PAD + off.y });
-  }
-  return { clusters, facts, factById, entityById, nodeEntities, hubs, mentionsByFact, factsByEntity, clusterOf, sizes, auto, chips };
+  return { anchors, ties, pairs, groups, facts, factById, entityById, mentionsByFact, factsByEntity };
 }
 
-type Box = { x: number; y: number; w: number; h: number; members: string[] };
+type SimNode = SimulationNodeDatum & { id: string; r: number; anchor: boolean; tied: boolean };
+type SimLink = SimulationLinkDatum<SimNode> & { dist: number; str: number };
 
-/** Boxes follow their members, so dragging a fact out of its group stretches the box instead of leaving it behind. */
-function boxesFor(model: Model, pos: Map<string, XY>): Map<string, Box> {
-  const out = new Map<string, Box>();
-  for (const c of model.clusters) {
-    const members = [...(c.entity ? [c.entity] : []), ...c.facts].filter((m) => pos.has(m));
-    if (!members.length) continue;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const m of members) {
-      const p = pos.get(m)!, s = model.sizes.get(m)!;
-      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x + s.w); maxY = Math.max(maxY, p.y + s.h);
-    }
-    const top = c.kind === "entity" ? 0 : LABEL_H;
-    out.set(c.id, { x: minX - PAD, y: minY - PAD - top, w: maxX - minX + 2 * PAD, h: maxY - minY + 2 * PAD + top, members });
+/** The physics: springs along the ties, everything pushing apart, a gentle pull to the middle. It is settled before
+ *  the first paint (from fixed starting positions, so the same memory always opens the same way) and then only runs
+ *  while something is being dragged. A node that was dragged stays where it was dropped. */
+function buildSim(model: Model, data: GraphData, pinned: Record<string, XY>) {
+  // With nothing to group round, the links between facts are all that shapes the picture, so they pull properly.
+  const bare = model.anchors.length === 0;
+  const tiesOf = new Map<string, number>();
+  for (const t of model.ties) tiesOf.set(t.fact, (tiesOf.get(t.fact) ?? 0) + 1);
+  const size = new Map(model.anchors.map((a) => [a.id, a.d]));
+  const nodes: SimNode[] = [
+    ...model.anchors.map((a) => ({ id: a.id, r: a.d / 2, anchor: true, tied: true })),
+    ...model.facts.map((f) => ({ id: f.id, r: FACT_D / 2, anchor: false, tied: tiesOf.has(f.id) || f.status !== "active" })),
+  ];
+  for (const n of nodes) { const p = pinned[n.id]; if (p) { n.fx = p.x; n.fy = p.y; } }
+  const links: SimLink[] = [];
+  for (const t of model.ties) {
+    // A fact that mentions several names sits between them; a name most facts mention pulls only weakly.
+    links.push({ source: t.fact, target: t.anchor, dist: size.get(t.anchor)! / 2 + 24, str: (t.hub ? 0.22 : 0.75) / Math.sqrt(tiesOf.get(t.fact)!) });
   }
-  return out;
+  for (const f of model.facts) {
+    if (f.status !== "active" && f.superseded_by && model.factById.has(f.superseded_by)) {
+      links.push({ source: f.id, target: f.superseded_by, dist: 18, str: 1 });
+    }
+  }
+  for (const e of data.edges) {
+    if (e.kind === "related" && model.factById.has(e.source) && model.factById.has(e.target)) {
+      links.push({ source: e.source, target: e.target, dist: bare ? 78 : 64, str: bare ? 0.12 : 0.012 });
+    }
+  }
+  // Each circle has its name written under it. A fact that drifts onto a name is nudged out sideways or downward,
+  // whichever is nearer, so names stay readable.
+  const labels = model.anchors.map((a) => ({ node: nodes.find((n) => n.id === a.id)!, half: Math.min(a.label.length, 30) * 3.6 + 10 }));
+  const halfLabel = new Map(labels.map((l) => [l.node.id, l.half]));
+  const dots = nodes.filter((n) => !n.anchor);
+  const keepOffLabels = (alpha: number) => {
+    for (const { node: a, half } of labels) {
+      const top = a.y! + a.r, bottom = top + 24;
+      for (const d of dots) {
+        if (d.y! < top - 6 || d.y! > bottom + 6 || Math.abs(d.x! - a.x!) > half + 8) continue;
+        const side = half + 8 - Math.abs(d.x! - a.x!), down = bottom + 6 - d.y!;
+        if (down < side) d.vy! += down * alpha * 0.9;
+        else d.vx! += (d.x! < a.x! ? -1 : 1) * side * alpha * 0.9;
+      }
+    }
+  };
+  const sim = forceSimulation(nodes)
+    .force("link", forceLink<SimNode, SimLink>(links).id((n) => n.id).distance((l) => l.dist).strength((l) => l.str))
+    .force("charge", forceManyBody<SimNode>().strength((n) => (n.anchor ? -260 - n.r * 6 : bare ? -150 : -34)).distanceMax(520))
+    // Room for the name written under a circle.
+    .force("collide", forceCollide<SimNode>((n) => (n.anchor ? Math.max(n.r + 24, halfLabel.get(n.id)! * 0.82) : n.r + (bare ? 6 : 3))).iterations(3))
+    // The canvas is wider than tall, so the pull to the middle is weaker sideways. Facts tied to nothing are pulled
+    // in a little harder: the circles push them back out, so they settle just round the edge of the network instead
+    // of drifting far off and shrinking the whole picture.
+    .force("x", forceX<SimNode>(0).strength((n) => (n.tied ? 0.05 : 0.075)))
+    .force("y", forceY<SimNode>(0).strength((n) => (n.tied ? 0.09 : 0.13)))
+    .force("labels", keepOffLabels)
+    .stop();
+  sim.tick(280);
+  return { sim, byId: new Map(nodes.map((n) => [n.id, n])) };
 }
 
-/** Positions the person dragged nodes to, kept per scope, view and grouping in this browser only. */
+/** Where the person dropped nodes, kept per scope, view and grouping in this browser only. */
 function loadMoved(key: string): Record<string, XY> {
   try {
     const raw = localStorage.getItem(key);
@@ -270,37 +253,25 @@ function saveMoved(key: string, moved: Record<string, XY>) {
   }
 }
 
+const ANCHOR_ROW: Record<Exclude<Group, "none">, string> = {
+  entity: "Name. Bigger means more facts mention it",
+  theme: "Theme. Bigger means more facts",
+  scope: "Scope. Bigger means more facts stored there",
+};
+const TIE_ROW: Record<Exclude<Group, "none">, string> = { entity: "Fact mentions the name", theme: "Fact has the theme", scope: "Fact is stored at the scope" };
+
 function Key({ group }: { group: Group }) {
-  const [open, setOpenState] = useState(() => { try { return localStorage.getItem("memx.graph.key") === "open"; } catch { return false; } });
-  const setOpen = (fn: (o: boolean) => boolean) => setOpenState((o) => {
-    const n = fn(o);
-    try { localStorage.setItem("memx.graph.key", n ? "open" : "closed"); } catch { /* storage unavailable */ }
-    return n;
-  });
   return (
-    <div className="gkey" style={open ? undefined : { width: "auto" }}>
-      <button className="gkey-h" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        {open ? <ChevronDown /> : <ChevronRight />} How to read this
-      </button>
-      {open && (
-        <>
-          {group === "entity" ? (
-            <>
-              <div className="krow"><span className="kent"><EntityIcon type="person" /></span><span><b>Entity</b> named in two or more facts: a person, team, system, place…</span></div>
-              <div className="krow"><span className="kbox ent" /><span><b>Its box</b> holds the facts filed under it. Drag the entity to move the whole box.</span></div>
-              <div className="krow"><span className="kbox" /><span><b>Theme box</b>: facts that share no entity, grouped by Jev's theme. Drag its tab to move it.</span></div>
-            </>
-          ) : (
-            <div className="krow"><span className="kbox" /><span><b>Scope box</b>: where facts are stored. Broader scopes on the left; a child sees its parents.</span></div>
-          )}
-          <div className="krow"><span className="kfact" /><span><b>Fact</b>. The colored bar is its category; struck through means replaced.</span></div>
-          <div className="krow"><span className="echip">Name</span><span>Other entities the fact names</span></div>
-          {group === "entity" && <div className="krow"><span className="ln" style={{ borderColor: "var(--entity)" }} /><span>Fact also names this entity</span></div>}
-          <div className="krow"><span className="ln dash" style={{ borderColor: "var(--accent)" }} /><span>Related: Jev judged both true and about the same subject. Switch in the toolbar</span></div>
-          <div className="krow"><span className="ln" style={{ borderColor: "var(--accent-2)" }} /><span>Hides a broader fact at this scope</span></div>
-          <div className="krow"><span className="ln" style={{ borderColor: "var(--muted)" }} /><span>Replaced by a newer fact (arrow points to the old one)</span></div>
-        </>
-      )}
+    <div className="gkey-strip">
+      <span><i className="kdot" />Fact, coloured by category</span>
+      <span><i className="kdot past" />Replaced fact</span>
+      {group !== "none" && <span><i className={`kbub ${group === "entity" ? "ent" : ""}`} />{ANCHOR_ROW[group]}</span>}
+      {group !== "none" && <span><i className="ln" style={{ borderColor: "var(--cat-preference)", borderTopWidth: 1.5 }} />{TIE_ROW[group]}</span>}
+      {group === "entity" && <span><i className="ln" style={{ borderColor: "var(--entity)", borderTopWidth: 4, opacity: 0.35 }} />Names often mentioned together</span>}
+      <span><i className="ln dash" style={{ borderColor: "var(--accent)" }} />Related facts</span>
+      {group === "none" && <span><i className="ln" style={{ borderColor: "var(--muted)" }} />Replaced by a newer fact</span>}
+      {group === "none" && <span><i className="ln" style={{ borderColor: "var(--accent-2)" }} />Hides a broader fact here</span>}
+      <span className="faint">Drag anything; it stays where you drop it.</span>
     </div>
   );
 }
@@ -362,7 +333,7 @@ function Inspector({ model, data, selected, select, open, close }: {
     const together = [...co].sort((a, b) => b[1] - a[1]).slice(0, 8);
     const history = fids.length - ent.degree;
     const note = ent.hub
-      ? "Named in most facts here, so its links are not drawn and it has no box of its own."
+      ? "Named in most facts here, so its links are drawn fainter and pull less; otherwise it would drag everything into one clump."
       : ent.degree >= 2 ? "Facts that name it are linked, and recall can hop between them."
       : "Only one fact names it so far, so it links nothing yet.";
     return (
@@ -400,6 +371,31 @@ function Inspector({ model, data, selected, select, open, close }: {
       </div>
     );
   }
+  // A theme or a scope: the facts gathered round it.
+  const gathered = model.groups.find((g) => g.id === selected && (g.kind === "theme" || g.kind === "scope"));
+  if (gathered) {
+    const n = gathered.facts.length;
+    return (
+      <div className="gpanel">
+        <div className="gp-h">
+          <span className="k">{gathered.kind === "theme" ? "Theme" : "Scope"}</span>
+          <button className="gp-close" onClick={close} aria-label="Close"><X /></button>
+        </div>
+        <div className="gp-title">{gathered.label}</div>
+        <div className="small muted">{n} fact{n === 1 ? "" : "s"} {gathered.kind === "theme" ? "on this theme." : "stored here."}</div>
+        <div className="gp-list">
+          {gathered.facts.map((id) => {
+            const f = model.factById.get(id)!;
+            return (
+              <button key={id} className="gp-item" onClick={() => select(id)} style={f.status !== "active" ? { textDecoration: "line-through", opacity: 0.7 } : undefined}>
+                <span className="sw" style={{ background: catVar(f.category) }} /><span>{truncate(f.text, 110)}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
   return null;
 }
 
@@ -407,160 +403,165 @@ function GraphCanvas({ data, focus, group }: { data: GraphData; focus?: string; 
   const { openFact } = useApp();
   const [hidden, setHidden] = useState<Set<Category>>(new Set());
   const [selected, setSelected] = useState<string | null>(focus ?? null);
+  const [hot, setHot] = useState<string | null>(null);
+  const [, setFrame] = useState(0);
   const flow = useReactFlow();
-  const storageKey = `memx.layout2.${group}.${data.view}.${data.scope}`;
+  const storageKey = `memx.graph.net.${group}.${data.view}.${data.scope}`;
   const [relMode, setRelModeState] = useState<RelMode>(loadRelMode);
   const setRelMode = (m: RelMode) => { setRelModeState(m); try { localStorage.setItem("memx.graph.related", m); } catch { /* storage unavailable */ } };
-  const [moved, setMoved] = useState<Record<string, XY>>(() => loadMoved(storageKey));
+  const [pinned, setPinned] = useState<Record<string, XY>>(() => loadMoved(storageKey));
+  const dragging = useRef(false);
+  const dragged = useRef(false); // a drag ends with a click on the same node; that click must not select it
 
   const model = useMemo(() => buildModel(data, hidden, group), [data, hidden, group]);
-  const pos = useMemo(() => {
-    const m = new Map(model.auto);
-    for (const [id, p] of Object.entries(moved)) if (m.has(id)) m.set(id, p);
-    return m;
-  }, [model.auto, moved]);
-  const boxes = useMemo(() => boxesFor(model, pos), [model, pos]);
-  const posRef = useRef(pos);
-  const boxRef = useRef(boxes);
-  posRef.current = pos;
-  boxRef.current = boxes;
+  // Built once per model; what was dropped where is read at that moment and applied by hand afterwards.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const { sim, byId } = useMemo(() => buildSim(model, data, loadMoved(storageKey)), [model, data, storageKey]);
+  const simRef = useRef<Simulation<SimNode, undefined>>(sim);
+  simRef.current = sim;
+  useEffect(() => {
+    let raf = 0;
+    sim.on("tick", () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => setFrame((f) => f + 1)); });
+    return () => { sim.on("tick", null); sim.stop(); cancelAnimationFrame(raf); };
+  }, [sim]);
 
-  const moveGroup = (next: Record<string, XY>, clusterId: string, dx: number, dy: number) => {
-    const box = boxRef.current.get(clusterId);
-    if (!box || (!dx && !dy)) return next;
-    const out = { ...next };
-    for (const m of box.members) { const p = posRef.current.get(m)!; out[m] = { x: p.x + dx, y: p.y + dy }; }
-    return out;
+  const at = (id: string): XY | null => { const n = byId.get(id); return n ? { x: n.x ?? 0, y: n.y ?? 0 } : null; };
+
+  // Dragging holds the node under the pointer and wakes the physics, so what is tied to it follows. On release the
+  // node stays where it was dropped and the rest settles round it.
+  const onNodeDragStart = useCallback((_: unknown, n: Node) => {
+    const node = byId.get(n.id);
+    if (!node) return;
+    dragging.current = true;
+    node.fx = node.x; node.fy = node.y;
+    sim.alphaTarget(0.25).restart();
+  }, [byId, sim]);
+  const onNodeDrag = useCallback((_: unknown, n: Node) => {
+    const node = byId.get(n.id);
+    if (!node) return;
+    node.fx = n.position.x + node.r; node.fy = n.position.y + node.r;
+    dragged.current = true;
+  }, [byId]);
+  const onNodeDragStop = useCallback((_: unknown, n: Node) => {
+    dragging.current = false;
+    setTimeout(() => { dragged.current = false; }, 0);
+    sim.alphaTarget(0);
+    const node = byId.get(n.id);
+    if (!node || node.fx == null || node.fy == null) return;
+    setPinned((prev) => { const next = { ...prev, [n.id]: { x: node.fx!, y: node.fy! } }; saveMoved(storageKey, next); return next; });
+  }, [byId, sim, storageKey]);
+  const resetLayout = () => {
+    for (const n of byId.values()) { n.fx = null; n.fy = null; }
+    setPinned({});
+    saveMoved(storageKey, {});
+    sim.alpha(0.9).restart();
+    setTimeout(() => flow.fitView({ padding: 0.1, maxZoom: 1.3, duration: 500 }), 900);
   };
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    setMoved((prev) => {
-      let next = prev;
-      for (const c of changes) {
-        if (c.type !== "position" || !c.position) continue;
-        if (c.id.startsWith("label:")) {
-          const cid = c.id.slice(6);
-          const box = boxRef.current.get(cid);
-          if (box) next = moveGroup(next, cid, c.position.x - (box.x + 10), c.position.y - (box.y + 8));
-        } else if (model.nodeEntities.includes(c.id)) {
-          const p = posRef.current.get(c.id);
-          const cid = model.clusterOf.get(c.id);
-          if (p && cid) next = moveGroup(next, cid, c.position.x - p.x, c.position.y - p.y);
-        } else {
-          next = { ...next, [c.id]: c.position };
-        }
-      }
-      return next;
-    });
-  }, [model]);
-  const onNodeDragStop = useCallback(() => setMoved((m) => { saveMoved(storageKey, m); return m; }), [storageKey]);
-  const resetLayout = () => { setMoved({}); saveMoved(storageKey, {}); setTimeout(() => flow.fitView({ padding: 0.12, maxZoom: 1, duration: 400 }), 50); };
-  const rearranged = Object.keys(moved).length > 0;
+  const rearranged = Object.keys(pinned).length > 0;
 
+  // What is lit: the selected node and what it touches, or, with nothing selected, whatever is pointed at.
+  const lead = selected ?? (dragging.current ? null : hot);
   const neighbors = useMemo(() => {
-    if (!selected) return null;
-    const s = new Set([selected]);
+    if (!lead) return null;
+    const s = new Set([lead]);
     for (const e of data.edges) {
-      if (e.source === selected) s.add(e.target);
-      if (e.target === selected) s.add(e.source);
+      if (e.source === lead) s.add(e.target);
+      if (e.target === lead) s.add(e.source);
     }
-    for (const f of model.factsByEntity.get(selected) ?? []) s.add(f);
-    for (const e of model.mentionsByFact.get(selected) ?? []) s.add(e);
+    for (const t of model.ties) {
+      if (t.fact === lead) s.add(t.anchor);
+      if (t.anchor === lead) s.add(t.fact);
+    }
+    for (const g of model.groups) if (g.id === lead) g.facts.forEach((f) => s.add(f));
     return s;
-  }, [selected, data.edges, model]);
+  }, [lead, data.edges, model]);
+  const lit = (id: string) => !neighbors || neighbors.has(id);
+  const strong = !!selected;
 
   const select = (id: string | null) => {
     setSelected(id);
-    const p = id ? pos.get(id) : undefined;
-    const sz = id ? model.sizes.get(id) : undefined;
-    if (p && sz) flow.setCenter(p.x + sz.w / 2, p.y + sz.h / 2, { zoom: Math.max(flow.getZoom(), 0.8), duration: 400 });
+    const p = id ? at(id) : null;
+    if (p) flow.setCenter(p.x, p.y, { zoom: Math.max(flow.getZoom(), 1), duration: 400 });
   };
 
+  // Every node carries its known size. Without it React Flow hides and re-measures all of them each time the list
+  // is rebuilt, which is on every step of the physics.
   const nodes: Node[] = [];
-  for (const c of model.clusters) {
-    const b = boxes.get(c.id);
-    if (!b) continue;
-    const dim = !!neighbors && !b.members.some((m) => neighbors.has(m));
+  for (const a of model.anchors) {
+    const p = at(a.id)!;
     nodes.push({
-      id: c.id, type: "cluster", position: { x: b.x, y: b.y }, draggable: false, selectable: false, focusable: false,
-      style: { width: b.w, height: b.h, pointerEvents: "none" }, data: { kind: c.kind, here: c.here, dim } satisfies ClusterNodeData,
-    });
-    if (c.kind !== "entity") {
-      nodes.push({
-        id: `label:${c.id}`, type: "clusterLabel", position: { x: b.x + 10, y: b.y + 8 }, selectable: false,
-        data: { kind: c.kind, label: c.label, count: c.facts.length, here: c.here, dim } satisfies ClusterLabelData,
-      });
-    }
-  }
-  for (const eid of model.nodeEntities) {
-    const e = model.entityById.get(eid)!;
-    nodes.push({
-      id: eid, type: "entity", position: pos.get(eid)!,
+      id: a.id, type: "anchor", position: { x: p.x - a.d / 2, y: p.y - a.d / 2 }, width: a.d, height: a.d, zIndex: 2,
       data: {
-        name: e.name, type: e.type, typeLabel: ENTITY_TYPE_LABEL[e.type] ?? "Entity", count: e.degree,
-        selected: eid === selected, dim: !!neighbors && !neighbors.has(eid),
-      } satisfies EntityNodeData,
+        kind: a.kind, label: a.label, type: a.type, count: a.count, size: a.d, here: a.here, selected: a.id === selected, dim: !lit(a.id),
+      } satisfies AnchorData,
     });
   }
   for (const f of model.facts) {
-    const chips = model.chips.get(f.id) ?? [];
+    const p = at(f.id)!;
     nodes.push({
-      id: f.id, type: "fact", position: pos.get(f.id)!,
+      id: f.id, type: "fact", position: { x: p.x - FACT_D / 2, y: p.y - FACT_D / 2 }, width: FACT_D, height: FACT_D, zIndex: 3,
       data: {
-        text: f.text, category: f.category, status: f.status, selected: f.id === selected,
-        dim: !!neighbors && !neighbors.has(f.id), width: NODE_W,
-        chips: chips.slice(0, CHIP_MAX), more: Math.max(0, chips.length - CHIP_MAX),
-        scopeTag: f.scope !== data.scope ? f.scope : undefined,
-        badges: f.shadowed_here ? <span title="Hidden at this scope by a narrower correction" style={{ color: "var(--accent-2)" }}>shadowed here</span> : f.reinforced_count > 0 ? <span title="Said again this many times">×{f.reinforced_count + 1}</span> : undefined,
-      } satisfies FactNodeData,
+        text: f.text, category: f.category, status: f.status, selected: f.id === selected, hot: f.id === hot, dim: !lit(f.id),
+        shadowed: f.shadowed_here,
+      } satisfies FactDotData,
     });
   }
 
-  const boxOf = (id: string) => ({ ...pos.get(id)!, ...model.sizes.get(id)! });
+  const ends = { sourceHandle: "s", targetHandle: "t", type: "straight" };
+  const arc = { ...ends, type: "arc" };
   const edges: Edge[] = [];
-  // "Related" links are Jev's "both true, same subject" verdicts. They are drawn for every fact by default (the
-  // toolbar switch can limit them to the selected fact, or hide them). Shadows and replacements always stay visible.
+  // Two names some fact mentions together: a soft band, thicker the more facts do.
+  for (const p of model.pairs) {
+    const on = !neighbors || p.a === lead || p.b === lead;
+    edges.push({
+      id: `p:${p.a}:${p.b}`, source: p.a, target: p.b, ...ends, zIndex: 0,
+      style: { stroke: "var(--entity)", strokeWidth: Math.min(9, 2 + p.n * 2), strokeLinecap: "round", opacity: on ? 0.16 : 0.03 },
+    });
+  }
+  // A fact to each name it mentions (or its theme, or its scope), in the colour of its category.
+  for (const t of model.ties) {
+    const on = !neighbors || t.fact === lead || t.anchor === lead;
+    const f = model.factById.get(t.fact)!;
+    edges.push({
+      id: `t:${t.fact}:${t.anchor}`, source: t.anchor, target: t.fact, ...ends, zIndex: 1,
+      style: {
+        stroke: catVar(f.category), strokeWidth: on && neighbors ? 1.6 : 1.1,
+        opacity: !on ? 0.05 : neighbors ? 0.9 : t.hub ? 0.22 : 0.5,
+      },
+    });
+  }
+  // "Related" links are Jev's "both true, same subject" verdicts. By default they show for the selected fact only;
+  // the toolbar switch can draw them all, or none. Shadows and replacements always stay visible.
   const allEdges = data.edges.filter((e) => model.factById.has(e.source) && model.factById.has(e.target));
   const relatedCount = allEdges.filter((e) => e.kind === "related").length;
-  const visibleEdges = allEdges.filter((e) => e.kind !== "related" || relMode === "always"
+  // With no grouping the links are the whole picture, so they are always drawn.
+  const bare = group === "none";
+  const visibleEdges = allEdges.filter((e) => e.kind !== "related" || bare || relMode === "always"
     || (relMode === "selected" && (e.source === selected || e.target === selected)));
   visibleEdges.forEach((e, i) => {
-    const active = neighbors ? (e.source === selected || e.target === selected) : true;
+    const active = neighbors ? (e.source === lead || e.target === lead) : true;
     const color = e.kind === "shadows" ? "var(--accent-2)" : e.kind === "supersedes" ? "var(--muted)" : "var(--accent)";
     const related = e.kind === "related";
     edges.push({
-      id: `e${i}`, source: e.source, target: e.target, type: "default", ...facing(boxOf(e.source), boxOf(e.target)),
-      label: active && selected && !related ? (e.kind === "supersedes" ? "replaced" : "hides") : undefined,
+      id: `e${i}`, source: e.source, target: e.target, ...arc, zIndex: 1,
+      label: active && strong && !related ? (e.kind === "supersedes" ? "replaced" : "hides") : undefined,
       style: {
-        stroke: color, strokeWidth: active && selected ? 2 : 1.5, strokeDasharray: related ? "6 4" : undefined,
-        opacity: !active ? 0.1 : related && !selected ? 0.75 : 0.95,
+        stroke: color, strokeWidth: active && strong ? 1.8 : 1, strokeDasharray: related ? "3 4" : undefined,
+        opacity: !active ? 0.04 : related && !neighbors ? (bare ? 0.5 : 0.18) : 0.9,
       },
-      markerEnd: e.kind === "related" ? undefined : { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
+      markerEnd: related ? undefined : { type: MarkerType.ArrowClosed, color, width: 12, height: 12 },
     });
   });
-  if (group === "entity") {
-    const nodeSet = new Set(model.nodeEntities);
-    for (const f of model.facts) {
-      for (const e of model.mentionsByFact.get(f.id) ?? []) {
-        if (!nodeSet.has(e) || model.clusterOf.get(e) === model.clusterOf.get(f.id)) continue;
-        const active = neighbors ? (f.id === selected || e === selected) : true;
-        edges.push({
-          id: `m:${e}:${f.id}`, source: e, target: f.id, type: "default", ...facing(boxOf(e), boxOf(f.id)),
-          style: { stroke: "var(--entity)", strokeWidth: active && selected ? 1.8 : 1.2, opacity: active ? (selected ? 0.95 : 0.55) : 0.06 },
-        });
-      }
-    }
-  }
 
   useEffect(() => {
-    if (focus && pos.has(focus)) {
-      const p = pos.get(focus)!;
-      setTimeout(() => flow.setCenter(p.x + NODE_W / 2, p.y + 40, { zoom: 1, duration: 500 }), 80);
-    }
+    const p = focus ? at(focus) : null;
+    if (p) setTimeout(() => flow.setCenter(p.x, p.y, { zoom: 1.3, duration: 500 }), 80);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus]);
 
   const present = CATEGORIES.filter((c) => data.facts.some((f) => f.category === c));
-  const themeCount = model.clusters.filter((c) => c.kind === "theme").length;
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  const counted = bare ? plural(allEdges.length, "link") : plural(model.anchors.length, group === "entity" ? "name" : group);
   return (
     <>
       <div className="row" style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)" }}>
@@ -572,55 +573,46 @@ function GraphCanvas({ data, focus, group }: { data: GraphData; focus?: string; 
           </button>
         ))}
         <span style={{ marginLeft: "auto" }} />
-        {relatedCount > 0 && (
+        {relatedCount > 0 && !bare && (
           <Seg label="Related links" value={relMode} onChange={setRelMode} options={[
             { value: "always", label: `Related links (${relatedCount})` }, { value: "selected", label: "On click" }, { value: "off", label: "Off" },
           ]} />
         )}
-        <span className="small muted">
-          {model.facts.length} facts
-          {group === "entity" ? ` · ${model.nodeEntities.length} linking entit${model.nodeEntities.length === 1 ? "y" : "ies"} · ${themeCount} theme${themeCount === 1 ? "" : "s"}` : ` · ${model.clusters.length} scope${model.clusters.length === 1 ? "" : "s"}`}
-        </span>
+        <span className="small muted">{plural(model.facts.length, "fact")} · {counted}</span>
         {rearranged && (
-          <button className="btn sm ghost" onClick={resetLayout} title="Put every node back where the automatic layout places it"><RotateCcw /> Reset layout</button>
+          <button className="btn sm ghost" onClick={resetLayout} title="Let everything go back to where the physics puts it"><RotateCcw /> Reset layout</button>
         )}
       </div>
-      {model.hubs.length > 0 && (
-        <div className="row" style={{ padding: "8px 14px", borderBottom: "1px solid var(--line)", gap: 6 }}>
-          <span className="small muted" title="Drawing their links would connect almost everything to everything">Named in most facts, so not drawn as boxes:</span>
-          {model.hubs.map((h) => (
-            <button key={h.id} className={`echip big ${selected === h.id ? "on" : ""}`} onClick={() => setSelected((s) => (s === h.id ? null : h.id))}>
-              <EntityIcon type={h.type} />{h.name}<span className="faint">{h.degree}</span>
-            </button>
-          ))}
+      <div className="flow graph">
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={graphNodeTypes}
+            edgeTypes={graphEdgeTypes}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDrag={onNodeDrag}
+            onNodeDragStop={onNodeDragStop}
+            nodesConnectable={false}
+            fitView
+            fitViewOptions={{ padding: 0.14, maxZoom: 1.3, minZoom: 0.3 }}
+            minZoom={0.1}
+            onNodeClick={(_, n) => { if (!dragged.current) setSelected((s) => (s === n.id ? null : n.id)); }}
+            onNodeDoubleClick={(_, n) => { if (model.factById.has(n.id)) openFact(n.id); }}
+            onNodeMouseEnter={(_, n) => setHot(n.id)}
+            onNodeMouseLeave={() => setHot(null)}
+            onPaneClick={() => setSelected(null)}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={22} size={1} color="var(--line)" />
+            <Controls showInteractive={false} position="bottom-right" />
+            {selected && (model.factById.has(selected) || model.entityById.has(selected) || model.anchors.some((a) => a.id === selected)) && (
+              <Panel position="top-right">
+                <Inspector model={model} data={data} selected={selected} select={select} open={openFact} close={() => setSelected(null)} />
+              </Panel>
+            )}
+          </ReactFlow>
         </div>
-      )}
-      <div className="flow tall">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
-          onNodeDragStop={onNodeDragStop}
-          nodesConnectable={false}
-          fitView
-          fitViewOptions={{ padding: 0.1, maxZoom: 1, minZoom: 0.35 }}
-          minZoom={0.1}
-          onNodeClick={(_, n) => { if (!n.id.startsWith("cluster:") && !n.id.startsWith("label:")) setSelected((s) => (s === n.id ? null : n.id)); }}
-          onNodeDoubleClick={(_, n) => { if (model.factById.has(n.id)) openFact(n.id); }}
-          onPaneClick={() => setSelected(null)}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background gap={22} size={1} color="var(--line)" />
-          <Controls showInteractive={false} position="bottom-right" />
-          {selected && (model.factById.has(selected) || model.entityById.has(selected)) && (
-            <Panel position="top-right">
-              <Inspector model={model} data={data} selected={selected} select={select} open={openFact} close={() => setSelected(null)} />
-            </Panel>
-          )}
-          <Panel position="bottom-left"><Key group={group} /></Panel>
-        </ReactFlow>
-      </div>
+      <Key group={group} />
     </>
   );
 }
@@ -630,14 +622,19 @@ type RelMode = "selected" | "always" | "off";
 function loadRelMode(): RelMode {
   try {
     const v = localStorage.getItem("memx.graph.related");
-    return v === "selected" || v === "off" ? v : "always";
+    return v === "always" || v === "off" ? v : "selected";
   } catch {
-    return "always";
+    return "selected";
   }
 }
 
 function loadGroup(): Group {
-  try { return localStorage.getItem("memx.graph.group") === "scope" ? "scope" : "entity"; } catch { return "entity"; }
+  try {
+    const v = localStorage.getItem("memx.graph.group");
+    return v === "scope" || v === "theme" || v === "none" ? v : "entity";
+  } catch {
+    return "entity";
+  }
 }
 
 export function GraphPage({ focus }: { focus?: string }) {
@@ -664,12 +661,15 @@ export function GraphPage({ focus }: { focus?: string }) {
       <div className="page-head">
         <div>
           <h1>Relationships</h1>
-          <p>What an agent at this scope knows, grouped by the people, teams and systems it is about. Click anything to see its connections; drag to rearrange.</p>
+          <p>What an agent at this scope knows. Each dot is a fact. Point at anything to see what it touches, click it to read it, and drag anything to rearrange.</p>
         </div>
         <div className="actions">
-          <Seg label="Group by" value={group} onChange={setGroup} options={[
-            { value: "entity", label: "Entities and themes" }, { value: "scope", label: "Scopes" },
-          ]} />
+          <span className="gseg">
+            <span>Group by</span>
+            <Seg label="Group by" value={group} onChange={setGroup} options={[
+              { value: "none", label: "None" }, { value: "entity", label: "Name" }, { value: "theme", label: "Theme" }, { value: "scope", label: "Scope" },
+            ]} />
+          </span>
           <Seg label="Which scopes" value={view} onChange={(v) => setChosen(v)} options={[
             { value: "chain", label: "This scope + parents" }, { value: "subtree", label: "This scope + children" },
           ]} />

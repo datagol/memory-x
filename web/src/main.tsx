@@ -11,7 +11,7 @@ import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import App from "./App";
 import { AppProvider } from "./lib/app";
-import { TipProvider, ToastProvider } from "./components/ui";
+import { ErrorBoundary, TipProvider, ToastProvider } from "./components/ui";
 
 const client = new QueryClient({
   defaultOptions: { queries: { staleTime: 5_000, refetchOnWindowFocus: false, retry: 1 } },
@@ -23,7 +23,9 @@ createRoot(document.getElementById("root")!).render(
       <AppProvider>
         <ToastProvider>
           <TipProvider>
-            <App />
+            <ErrorBoundary>
+              <App />
+            </ErrorBoundary>
           </TipProvider>
         </ToastProvider>
       </AppProvider>

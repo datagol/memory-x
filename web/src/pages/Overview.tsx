@@ -3,7 +3,7 @@ import { ArrowRight, PlusCircle, Search } from "lucide-react";
 import { api, type Category } from "../lib/api";
 import { useApp } from "../lib/app";
 import { CATEGORIES, CATEGORY_LABEL, catVar, ms, timeAgo, truncate } from "../lib/meta";
-import { Card, Empty, ErrorBox, Loading, Pill, useTip } from "../components/ui";
+import { Card, Empty, ErrorBox, Loading, Pill, useTip, rowKeys } from "../components/ui";
 
 function Kpi({ label, value, detail }: { label: string; value: React.ReactNode; detail?: React.ReactNode }) {
   return (
@@ -124,7 +124,7 @@ export function Overview() {
           {ingests.data?.length ? (
             <table className="t"><tbody>
               {ingests.data.map((r) => (
-                <tr key={r.id} className="click" onClick={() => go({ page: "ingest", id: r.id })}>
+                <tr key={r.id} className="click" onClick={() => go({ page: "ingest", id: r.id })} {...rowKeys(() => go({ page: "ingest", id: r.id }))}>
                   <td style={{ width: 90 }}><Pill tone={r.status === "committed" ? "ok" : r.status === "failed" ? "danger" : "warn"}>{r.status}</Pill></td>
                   <td><div className="ellipsis" style={{ maxWidth: 360 }}>{truncate(r.preview, 120)}</div><div className="small faint mono">{r.scope}</div></td>
                   <td className="n small muted">{r.receipt ? `+${r.receipt.added ?? 0}` : "—"}<div className="faint">{timeAgo(r.created_at)}</div></td>
@@ -137,7 +137,7 @@ export function Overview() {
           {recalls.data?.length ? (
             <table className="t"><tbody>
               {recalls.data.map((r) => (
-                <tr key={r.id} className="click" onClick={() => go({ page: "recall", id: r.id })}>
+                <tr key={r.id} className="click" onClick={() => go({ page: "recall", id: r.id })} {...rowKeys(() => go({ page: "recall", id: r.id }))}>
                   <td style={{ width: 90 }}><Pill tone={r.mode === "ranked" ? "accent" : "purple"}>{r.mode}</Pill></td>
                   <td><div className="ellipsis" style={{ maxWidth: 360 }}>{r.query ?? <span className="muted">(no query)</span>}</div><div className="small faint mono">{r.scope}</div></td>
                   <td className="n small muted">{r.facts} facts<div className="faint">{timeAgo(r.created_at)}</div></td>

@@ -1,5 +1,5 @@
 import { Logo } from "./components/Logo";
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity, BrainCircuit, KeyRound, LayoutDashboard, Monitor, Moon, Network, PlusCircle, Search, Settings, Sun,
@@ -8,14 +8,18 @@ import { ApiError, api, getToken, setToken } from "./lib/api";
 import { useApp, type Route } from "./lib/app";
 import { ScopePicker } from "./components/ScopePicker";
 import { FactDrawer } from "./components/FactDrawer";
-import { Seg } from "./components/ui";
+import { Loading, Seg } from "./components/ui";
 import { Overview } from "./pages/Overview";
 import { MemoryPage } from "./pages/Memory";
-import { GraphPage } from "./pages/Graph";
-import { AddPage, IngestPage } from "./pages/Ingest";
-import { AskPage, RecallPage } from "./pages/Ask";
 import { ActivityPage } from "./pages/Activity";
 import { SettingsPage } from "./pages/Settings";
+
+// The graph, insert and ask pages bring the diagram library with them; load it only when one of them is opened.
+const GraphPage = lazy(() => import("./pages/Graph").then((m) => ({ default: m.GraphPage })));
+const AddPage = lazy(() => import("./pages/Ingest").then((m) => ({ default: m.AddPage })));
+const AskPage = lazy(() => import("./pages/Ask").then((m) => ({ default: m.AskPage })));
+const RecallPage = lazy(() => import("./pages/Ask").then((m) => ({ default: m.RecallPage })));
+const IngestPage = lazy(() => import("./pages/Ingest").then((m) => ({ default: m.IngestPage })));
 
 const NAV: { page: Route["page"]; label: string; icon: JSX.Element }[] = [
   { page: "overview", label: "Overview", icon: <LayoutDashboard /> },
@@ -47,6 +51,10 @@ function TokenGate() {
 }
 
 function Page() {
+  return <Suspense fallback={<Loading />}><PageBody /></Suspense>;
+}
+
+function PageBody() {
   const { route } = useApp();
   switch (route.page) {
     case "memory": return <MemoryPage />;

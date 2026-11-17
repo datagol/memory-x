@@ -287,7 +287,8 @@ export interface RecallRow {
   created_at: string;
 }
 
-export interface RecallDetail extends RecallRow {
+export interface RecallDetail extends Omit<RecallRow, "facts"> {
+  facts: Fact[]; // the detail endpoint returns the facts themselves, the list only their count
   fact_ids: string[];
   scores: Record<string, number>;
   explain: Explain | null;
